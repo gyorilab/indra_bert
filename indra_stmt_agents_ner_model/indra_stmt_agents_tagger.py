@@ -1,5 +1,7 @@
 from transformers import AutoTokenizer, AutoModelForTokenClassification
+import torch.nn.functional as F
 import torch
+from collections import defaultdict
 from pathlib import Path
 
 from indra_stmt_agents_ner_model.preprocess import preprocess_for_inference, reassign_member_indices
@@ -73,20 +75,63 @@ class IndraAgentsTagger:
             annotated_text += f"</{open_tag}>"
 
         return annotated_text
+    
+    def predict_tags(self, stmt_type: str, text: str):
+        enc = preprocess_for_inference(stmt_type, text, self.tokenizer)
+        input_ids = enc["input_ids"]
+        attention_mask = enc["attention_mask"]
+        tokens = enc["tokens"]
+        offsets = enc["offsets"]
+        seq_ids = enc["sequence_ids"]
+
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            probs = F.softmax(outputs.logits, dim=-1)
+            predictions = torch.argmax(probs, dim=2)[0]
+            confidence_scores = torch.max(probs, dim=2).values[0]  # shape: (seq_len,)
+
+        pred_labels = [self.id2label[p.item()] for p in predictions]
+        confidences = [c.item() for c in confidence_scores]
+
+        return pred_labels, confidences, tokens, offsets, seq_ids
+
+    def extract_agents(self, tokens, bio_tags, seq_ids):
+        agents = defaultdict(list)
+        current_tag, current_phrase = None, []
+
+        for token, tag, sid in zip(tokens, bio_tags, seq_ids):
+            if sid != 1:
+                continue
+            if tag.startswith("B-"):
+                if current_tag and current_phrase:
+                    agents[current_tag].append("".join(current_phrase))
+                current_tag = tag[2:]
+                current_phrase = [token]
+            elif tag.startswith("I-") and current_tag:
+                current_phrase.append(token)
+            else:
+                if current_tag and current_phrase:
+                    agents[current_tag].append("".join(current_phrase))
+                current_tag, current_phrase = None, []
+
+        if current_tag and current_phrase:
+            agents[current_tag].append("".join(current_phrase))
+
+        return dict(agents)
 
     def predict(self, stmt_type: str, text: str) -> dict:
-        """
-        End-to-end tag prediction and annotation.
-        """
-        bio_tags, tokens, offsets, seq_ids = self.predict_tags(stmt_type, text)
+        bio_tags, confidences, tokens, offsets, seq_ids = self.predict_tags(stmt_type, text)
 
-         # Reassign members.0, .1, ... dynamically
+        # Reassign members.0, .1, ... dynamically
         bio_tags = reassign_member_indices(bio_tags)
 
         annotated = self.annotate_text(text, offsets, seq_ids, bio_tags)
+        agents = self.extract_agents(tokens, bio_tags, seq_ids)
 
         return {
             "annotated_text": annotated,
             "tokens": tokens,
-            "bio_tags": bio_tags
+            "bio_tags": bio_tags,
+            "confidence": confidences,
+            "agents": agents
         }
