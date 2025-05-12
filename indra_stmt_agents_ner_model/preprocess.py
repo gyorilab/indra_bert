@@ -77,7 +77,7 @@ def load_and_preprocess_from_raw_data(input_path):
     return examples
 
 # ---- Build label maps from dataset ----
-def build_label_mappings(examples, tokenizer):
+def build_label_mappings(examples):
     label_set = set()
     for example in examples:
         clean_text, role_spans = parse_role_spans(example["annotated_text"])
@@ -97,49 +97,52 @@ def build_label_mappings(examples, tokenizer):
     return label2id, id2label
 
 # ---- Tokenize for model ----
-def preprocess_examples_from_dataset(batch, tokenizer, label2id):
-    clean_texts = []
-    all_bio_tags = []
-    for annotated_text in batch["annotated_text"]:
-        clean_text, role_spans = parse_role_spans(annotated_text)
-        tokens = clean_text.split()
-        char_spans = []
-        current = 0
-        for tok in tokens:
-            start = clean_text.find(tok, current)
-            end = start + len(tok)
-            char_spans.append((start, end))
-            current = end
-        bio_tags = char_to_token_labels(tokens, char_spans, role_spans)
-        clean_texts.append(tokens)
-        all_bio_tags.append(bio_tags)
+def preprocess_examples_from_dataset(example, tokenizer, label2id):
+    annotated_text = example["annotated_text"]
+    stmt_type = example["statement_type"]
+    match_id = example["matches_hash"]
 
+    # Remove tags and get spans
+    clean_text, role_spans = parse_role_spans(annotated_text)
+
+    # Tokenize full pair
     encoding = tokenizer(
-        batch["statement_type"],
-        clean_texts,
-        is_split_into_words=True,
+        text=stmt_type,
+        text_pair=clean_text,
         return_offsets_mapping=True,
-        padding="max_length",
-        truncation=True
+        truncation=True,
+        max_length=512,
+        padding=False, # Handle padding in collator in the training
+        add_special_tokens=True,
     )
 
-    all_labels = []
-    for i in range(len(encoding["input_ids"])):
-        word_ids = encoding.word_ids(batch_index=i)
-        labels = []
-        for word_idx in word_ids:
-            if word_idx is None:
-                labels.append(-100)
-            else:
-                labels.append(label2id[all_bio_tags[i][word_idx]])
-        all_labels.append(labels)
+    tokens = tokenizer.convert_ids_to_tokens(encoding["input_ids"])
+    offsets = encoding["offset_mapping"]
+    seq_ids = encoding.sequence_ids()
 
-    encoding["labels"] = all_labels
-    encoding["tokens"] = [tokenizer.convert_ids_to_tokens(ids) for ids in encoding["input_ids"]]
-    encoding["ner_tags"] = all_bio_tags
-    encoding["matches_hash"] = batch["matches_hash"]
+    # Mask non-clean_text part using sequence_ids
+    relevant_offsets = [
+        offsets[i] if sid == 1 else (None, None)
+        for i, sid in enumerate(seq_ids)
+    ]
 
-    return encoding
+    # Create BIO tags
+    bio_tags = char_to_token_labels(tokens, relevant_offsets, role_spans)
+
+    # Assign label ids
+    label_ids = [
+        -100 if offset == (None, None) else label2id[bio_tag]
+        for offset, bio_tag in zip(relevant_offsets, bio_tags)
+    ]
+
+    return {
+        "input_ids": encoding["input_ids"],
+        "attention_mask": encoding["attention_mask"],
+        "labels": label_ids,
+        "tokens": tokens,
+        "ner_tags": bio_tags,
+        "matches_hash": match_id
+    }
 
 # ---- Preprocess for inference ----
 def preprocess_for_inference(stmt_type, text, tokenizer):
@@ -150,7 +153,7 @@ def preprocess_for_inference(stmt_type, text, tokenizer):
         return_tensors="pt",
         truncation=True,
         max_length=512,
-        padding="max_length",
+        padding="longest",
         add_special_tokens=True
     )
 

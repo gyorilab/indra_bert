@@ -13,6 +13,47 @@ from indra_stmt_agents_ner_model.preprocess import (
     preprocess_examples_from_dataset
 )
 
+from transformers import DataCollatorForTokenClassification
+from typing import Any, Dict, List
+import torch
+
+
+# ---- Data Collator ----
+class DataCollatorWithDebug(DataCollatorForTokenClassification):
+    def __init__(self, tokenizer, id2label, max_examples_to_print=1, **kwargs):
+        super().__init__(tokenizer, **kwargs)
+        self.tokenizer = tokenizer
+        self.id2label = id2label
+        self.counter = 0
+        self.max_examples_to_print = max_examples_to_print
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        batch = super().__call__(features)
+
+        if self.counter < self.max_examples_to_print:
+            for i in range(min(len(features), self.max_examples_to_print - self.counter)):
+                input_ids = batch["input_ids"][i]
+                labels = batch["labels"][i]
+                attention_mask = batch["attention_mask"][i]
+                token_type_ids = batch.get("token_type_ids", None)
+
+                tokens = self.tokenizer.convert_ids_to_tokens(input_ids)
+                label_names = [self.id2label.get(l.item(), "IGN") if l.item() != -100 else "PAD" for l in labels]
+
+                print("\n--- DEBUG: Training Example ---")
+                print(f"{'Token':15} {'Label':12} {'AttnMask':9} {'TokenType':9}")
+                print("-" * 50)
+                for j, tok in enumerate(tokens):
+                    attn = attention_mask[j].item()
+                    label = label_names[j]
+                    ttype = token_type_ids[j].item() if token_type_ids is not None else "-"
+                    print(f"{tok:15} {label:12} {attn:<9} {ttype}")
+                print("-" * 50)
+
+            self.counter += len(features)
+
+        return batch
+    
 # ---- Metrics ----
 def compute_metrics(p):
     predictions, labels = p
@@ -42,7 +83,7 @@ def main(args):
     raw_examples = load_and_preprocess_from_raw_data(dataset_path)
 
     # ---- Build label mappings from dataset ----
-    label2id, id2label = build_label_mappings(raw_examples, tokenizer)
+    label2id, id2label = build_label_mappings(raw_examples)
 
     # ---- Convert to HuggingFace Dataset ----
     dataset = Dataset.from_list(raw_examples)
@@ -58,15 +99,15 @@ def main(args):
     # ---- Preprocess for model ----
     train_dataset = train_dataset.map(
         lambda x: preprocess_examples_from_dataset(x, tokenizer, label2id),
-        batched=True
+        batched=False
     )
     val_dataset = val_dataset.map(
         lambda x: preprocess_examples_from_dataset(x, tokenizer, label2id),
-        batched=True
+        batched=False
     )
     test_dataset = test_dataset.map(
         lambda x: preprocess_examples_from_dataset(x, tokenizer, label2id),
-        batched=True
+        batched=False
     )
 
     # ---- Load model ----
@@ -86,10 +127,19 @@ def main(args):
         learning_rate=2e-5,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        num_train_epochs=5,
+        num_train_epochs=10,
         weight_decay=0.01,
         save_total_limit=1,
         logging_dir='./logs',
+    )
+
+
+    data_collator = DataCollatorWithDebug(
+        tokenizer=tokenizer,
+        id2label=id2label,
+        max_examples_to_print=3,  # Print only first 3 batches
+        padding=True,
+        return_tensors="pt"
     )
 
     trainer = Trainer(
@@ -97,7 +147,8 @@ def main(args):
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        tokenizer=tokenizer,
+        # tokenizer=tokenizer,  # optional
+        data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
 
