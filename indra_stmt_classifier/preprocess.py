@@ -3,9 +3,21 @@ from pathlib import Path
 from tqdm import tqdm
 from collections import OrderedDict
 from transformers import AutoTokenizer
+import re
+
+# ---- Normalize annotation tags ----
+def normalize_entity_tags(text: str) -> str:
+    """
+    Replace all opening <...> tags with <e> and all closing </...> tags with </e>
+    """
+    # Replace any opening tag like <subj>, <obj>, <xyz> with <e>
+    text = re.sub(r"<[^/][^>]*>", "<e>", text)
+    # Replace any closing tag like </subj>, </obj>, </xyz> with </e>
+    text = re.sub(r"</[^>]+>", "</e>", text)
+    return text
 
 # ---- Load + preprocess raw training data ----
-def load_and_preprocess_raw_data(input_path,):
+def load_and_preprocess_raw_data(input_path):
     examples = []
     stmt2id = OrderedDict()
 
@@ -13,17 +25,15 @@ def load_and_preprocess_raw_data(input_path,):
         for idx, line in enumerate(tqdm(f, desc="Loading and preprocessing")):
             try:
                 obj = json.loads(line)
-                raw_text = obj["text"]
+                annotated_text = normalize_entity_tags(obj["annotated_text"])
                 label = obj["statement"]["type"]
 
                 if label not in stmt2id:
                     stmt2id[label] = len(stmt2id)
 
-                full_text = raw_text
-
                 examples.append({
                     "id": idx,
-                    "text": full_text,
+                    "text": annotated_text,
                     "stmt_label": label,
                     "stmt_label_id": stmt2id[label]
                 })
@@ -48,12 +58,12 @@ def preprocess_examples_for_model(examples, tokenizer):
 
 # ---- Tokenize for inference ----
 def preprocess_for_inference(text, tokenizer):
-
+    # No preprocess needed currently, but keeping for consistency
     return tokenizer(
         text,
         return_tensors="pt",
         truncation=True,
         max_length=512,
-        padding="max_length",
+        padding="longest",
         add_special_tokens=True
     )

@@ -7,10 +7,12 @@ from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForTokenClassification, Trainer, TrainingArguments
 from sklearn.metrics import precision_recall_fscore_support
 
-from indra_stmt_agents_ner_model.preprocess import (
+
+from indra_agent_role_assigner.preprocess import (
     load_and_preprocess_from_raw_data,
     build_label_mappings,
-    preprocess_examples_from_dataset
+    preprocess_examples_from_dataset,
+    SpecialTokenOffsetFixTokenizer,
 )
 
 from transformers import DataCollatorForTokenClassification
@@ -77,8 +79,8 @@ def main(args):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- Load tokenizer ----
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract") 
+    special_tokenizer = SpecialTokenOffsetFixTokenizer(tokenizer)
     # ---- Load raw data ----
     raw_examples = load_and_preprocess_from_raw_data(dataset_path)
 
@@ -98,15 +100,15 @@ def main(args):
 
     # ---- Preprocess for model ----
     train_dataset = train_dataset.map(
-        lambda x: preprocess_examples_from_dataset(x, tokenizer, label2id),
+        lambda x: preprocess_examples_from_dataset(x, special_tokenizer, label2id),
         batched=False
     )
     val_dataset = val_dataset.map(
-        lambda x: preprocess_examples_from_dataset(x, tokenizer, label2id),
+        lambda x: preprocess_examples_from_dataset(x, special_tokenizer, label2id),
         batched=False
     )
     test_dataset = test_dataset.map(
-        lambda x: preprocess_examples_from_dataset(x, tokenizer, label2id),
+        lambda x: preprocess_examples_from_dataset(x, special_tokenizer, label2id),
         batched=False
     )
 
@@ -117,6 +119,7 @@ def main(args):
         id2label=id2label,
         label2id=label2id
     )
+    model.resize_token_embeddings(len(special_tokenizer.tokenizer))
 
     # ---- Training arguments ----
     training_args = TrainingArguments(
@@ -135,7 +138,7 @@ def main(args):
 
 
     data_collator = DataCollatorWithDebug(
-        tokenizer=tokenizer,
+        tokenizer=special_tokenizer.tokenizer,
         id2label=id2label,
         max_examples_to_print=3,  # Print only first 3 batches
         padding=True,
@@ -147,7 +150,7 @@ def main(args):
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        # tokenizer=tokenizer,  # optional
+        tokenizer=special_tokenizer.tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )

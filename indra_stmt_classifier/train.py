@@ -7,12 +7,12 @@ from datasets import Dataset
 from transformers import AutoTokenizer, TrainingArguments
 from sklearn.metrics import precision_recall_fscore_support
 
-from indra_stmt_classifier_model.relation_model import BertForIndraStmtClassification
-from indra_stmt_classifier_model.preprocess import (
+from indra_stmt_classifier.bert_classification_head import BertForIndraStmtClassification
+from indra_stmt_classifier.preprocess import (
     load_and_preprocess_raw_data,
     preprocess_examples_for_model,
 )
-from indra_stmt_classifier_model.weighted_trainer import WeightedTrainer, compute_class_weights
+from indra_stmt_classifier.weighted_trainer import WeightedTrainer, compute_class_weights
 
 
 def compute_metrics(p):
@@ -30,6 +30,10 @@ def main(args):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+
+    # Add entity tags as special tokens
+    special_tokens_dict = {'additional_special_tokens': ['<e>', '</e>']}
+    tokenizer.add_special_tokens(special_tokens_dict)
 
     # ---- Load and preprocess raw data ----
     examples, stmt2id = load_and_preprocess_raw_data(dataset_path)
@@ -62,7 +66,9 @@ def main(args):
         label2id=stmt2id,
         id2label=id2stmt,
     )
-
+    # Resize token embeddings to accommodate <e> and </e>
+    model.resize_token_embeddings(len(tokenizer))
+    
     # ---- Training ----
     training_args = TrainingArguments(
         output_dir=output_dir,

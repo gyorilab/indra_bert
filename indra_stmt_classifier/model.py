@@ -1,8 +1,8 @@
 from transformers import AutoTokenizer
 import torch
 from pathlib import Path
-from indra_stmt_classifier_model.preprocess import preprocess_for_inference
-from indra_stmt_classifier_model.relation_model import BertForIndraStmtClassification
+from indra_stmt_classifier.preprocess import preprocess_for_inference
+from indra_stmt_classifier.bert_classification_head import BertForIndraStmtClassification
 
 
 class IndraStmtClassifier:
@@ -40,5 +40,6 @@ class IndraStmtClassifier:
             "confidence": confidence.item(),
             "probabilities": prob_dist,
             "input_ids": enc["input_ids"],
-            "decoded_text": self.tokenizer.decode(enc["input_ids"].squeeze())
+            "decoded_text": self.tokenizer.decode(enc["input_ids"].squeeze()),
+            "original_text": text
         }

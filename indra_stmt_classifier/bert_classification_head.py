@@ -1,26 +1,27 @@
 import torch.nn as nn
-from transformers import AutoModel, AutoConfig, PreTrainedModel
+from transformers import AutoModel, AutoConfig, PreTrainedModel, BertConfig
 from transformers.modeling_outputs import SequenceClassifierOutput
 
-
 class BertForIndraStmtClassification(PreTrainedModel):
-    config_class = AutoConfig  # This tells HF to use AutoConfig when loading/saving configs
+    config_class = AutoConfig  # Or dynamic if supporting multiple models
 
     def __init__(self, config):
         super().__init__(config)
 
-        # Load the base model (BERT or other transformer)
         self.bert = AutoModel.from_config(config)
-
-        # Classification head
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
-        # Initialize weights (this initializes classifier weights properly)
         self.post_init()
+
+    def get_input_embeddings(self):
+        return self.bert.get_input_embeddings()
+
+    def set_input_embeddings(self, new_embeddings):
+        self.bert.set_input_embeddings(new_embeddings)
 
     @classmethod
     def from_pretrained_with_labels(cls, pretrained_model_name, label2id, id2label, **kwargs):
-        # Load config from pretrained and update label mappings
         config = AutoConfig.from_pretrained(
             pretrained_model_name,
             num_labels=len(label2id),
@@ -28,32 +29,24 @@ class BertForIndraStmtClassification(PreTrainedModel):
             id2label=id2label,
             **kwargs
         )
-        # Initialize model
         model = cls(config)
-        # Load pretrained weights
         model.bert = AutoModel.from_pretrained(pretrained_model_name, config=config)
         return model
 
-    def forward(self, input_ids, attention_mask=None, labels=None):
-        # Get encoder outputs
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None, labels=None):
         outputs = self.bert(
-            input_ids=input_ids, 
-            attention_mask=attention_mask
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids
         )
 
-        # Get CLS token embedding
-        pooled_output = outputs.last_hidden_state[:, 0]
-
-        # Classification head
+        pooled_output = self.dropout(outputs.last_hidden_state[:, 0])
         logits = self.classifier(pooled_output)
 
-        # Compute loss if labels are provided
         loss = None
         if labels is not None:
-            loss_fn = nn.CrossEntropyLoss()
-            loss = loss_fn(logits, labels)
+            loss = nn.CrossEntropyLoss()(logits, labels)
 
-        # Return standard HuggingFace classification output
         return SequenceClassifierOutput(
             loss=loss,
             logits=logits,

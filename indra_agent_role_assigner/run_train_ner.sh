@@ -6,7 +6,7 @@ conda activate indra_gpt
 
 cd ~/gyorilab/indra_bert
 
-python -m indra_stmt_agents_ner_model.train_indra_stmt_agents_ner \
-    --dataset data/indra_benchmark_corpus_annotated_stratified_sample.jsonl \
+python -m indra_agent_role_assigner.train \
+    --dataset data/indra_benchmark_annotated_data/indra_benchmark_corpus_annotated_stratified_sample.jsonl \
     --model_name microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract \
-    --output_dir output/indra_stmt_agents_ner
+    --output_dir output/indra_stmt_agents_role_assigner \
