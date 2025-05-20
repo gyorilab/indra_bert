@@ -1,9 +1,13 @@
-from itertools import combinations
-from ner_agent_detector.model import AgentNERModel
-from indra_stmt_classifier.model import IndraStmtClassifier
-from indra_agent_role_assigner.model import IndraAgentsTagger
-from utils.annotate import annotate_entities
+__all__ = ['IndraStructuredExtractor']
+
 from typing import List
+from itertools import combinations
+
+from .ner_agent_detector.model import AgentNERModel
+from .indra_stmt_classifier.model import IndraStmtClassifier
+from .indra_agent_role_assigner.model import IndraAgentsTagger
+from .utils.annotate import annotate_entities
+
 
 class IndraStructuredExtractor:
     def __init__(self, ner_model_path, stmt_model_path, role_model_path, stmt_conf_threshold=0.95):
