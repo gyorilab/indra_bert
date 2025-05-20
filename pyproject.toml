@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "indra_bert"
+version = "0.1.0"
+description = "INDRA Statement extraction from text using fine-tuned BERT models."
+authors = [
+    { name="Thomas Lim", email="hy.lim@northeastern.edu",
+      name="Benjamin M. Gyori", email="b.gyori@northeastern.edu"}
+]
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+dependencies = [
+    "tqdm",
+    "numpy",
+    "scikit-learn",
+    "torch",
+    "transformers",
+    "datasets"
+]
+
+[tool.setuptools]
+packages = ["indra_bert"]
