@@ -1,7 +1,7 @@
 from transformers import AutoTokenizer
 import torch
 from pathlib import Path
-from indra_stmt_classifier.preprocess import preprocess_for_inference
+from indra_stmt_classifier.preprocess import preprocess_for_inference, preprocess_for_inference_batch
 from indra_stmt_classifier.bert_classification_head import BertForIndraStmtClassification
 
 
@@ -43,3 +43,39 @@ class IndraStmtClassifier:
             "decoded_text": self.tokenizer.decode(enc["input_ids"].squeeze()),
             "original_text": text
         }
+
+    def predict_batch(self, texts: list[str]):
+        # Step 1: Batch tokenization
+        enc = preprocess_for_inference_batch(
+            texts=texts,
+            tokenizer=self.tokenizer,
+        )
+
+        input_ids = enc["input_ids"].to(self.device)
+        attention_mask = enc["attention_mask"].to(self.device)
+
+        # Step 2: Model inference
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits  # shape: (batch_size, num_classes)
+            probs = torch.softmax(logits, dim=-1)
+            confidences, predicted_classes = probs.max(dim=-1)
+
+        results = []
+        for i in range(len(texts)):
+            predicted_label = self.id2label[int(predicted_classes[i].item())]
+            confidence = confidences[i].item()
+            prob_dist = {
+                self.id2label[j]: probs[i][j].item() for j in range(probs.size(1))
+            }
+
+            results.append({
+                "predicted_label": predicted_label,
+                "confidence": confidence,
+                "probabilities": prob_dist,
+                "input_ids": input_ids[i],
+                "decoded_text": self.tokenizer.decode(input_ids[i]),
+                "original_text": texts[i]
+            })
+
+        return results

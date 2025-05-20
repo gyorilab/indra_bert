@@ -49,3 +49,48 @@ class AgentNERModel:
             entity_text = span["text"]
             text = text[:start] + f"<e>{entity_text}</e>" + text[end:]
         return text
+
+    def predict_batch(self, texts: list[str]):
+        # Step 1: Tokenize as a batch
+        encodings = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            return_offsets_mapping=True,
+            max_length=512,
+            return_tensors="pt"
+        )
+
+        input_ids = encodings["input_ids"]
+        attention_mask = encodings["attention_mask"]
+        offset_mappings = encodings["offset_mapping"]  # shape: (batch_size, seq_len, 2)
+
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits  # shape: (batch_size, seq_len, num_labels)
+            predictions = torch.argmax(logits, dim=2)  # shape: (batch_size, seq_len)
+
+        results = []
+        for i in range(len(texts)):
+            token_ids = input_ids[i]
+            tokens = self.tokenizer.convert_ids_to_tokens(token_ids)
+            preds = predictions[i].tolist()
+            offsets = offset_mappings[i].tolist()
+
+            entity_spans = extract_spans_from_encoding(
+                tokens=tokens,
+                offset_mapping=offsets,
+                predicted_label_ids=preds,
+                id2label=self.id2label,
+                text=texts[i]
+            )
+
+            annotated_text = self._annotate_text(texts[i], entity_spans)
+
+            results.append({
+                "text": texts[i],
+                "entity_spans": entity_spans,
+                "annotated_text": annotated_text
+            })
+
+        return results

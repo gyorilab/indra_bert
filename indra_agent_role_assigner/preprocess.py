@@ -90,30 +90,39 @@ class SpecialTokenOffsetFixTokenizer:
         self.tokenizer.add_special_tokens({"additional_special_tokens": list(self.special_tokens)})
 
     def __call__(self, *args, return_offsets_mapping=False, **kwargs):
-        # Always request offset mapping so we can patch it
         encoding = self.tokenizer(*args, return_offsets_mapping=True, **kwargs)
 
         input_ids = encoding["input_ids"]
         offsets = encoding["offset_mapping"]
 
-        # Handle both batched and single example
-        is_batched = isinstance(input_ids[0], (list, torch.Tensor))
+        is_batched = isinstance(input_ids, torch.Tensor) and input_ids.ndim == 2
 
-        # Convert to lists for editing
-        input_ids_list = [ids.tolist() if isinstance(ids, torch.Tensor) else ids for ids in (input_ids if is_batched else [input_ids])]
-        offsets_list = [o.tolist() if isinstance(o, torch.Tensor) else o for o in (offsets if is_batched else [offsets])]
+        # Convert offsets to list-of-lists for mutation
+        if is_batched:
+            offsets = [list(map(tuple, o.tolist())) for o in offsets]
+        else:
+            offsets = list(map(tuple, offsets.tolist()))
 
-        # Tokenize IDs to tokens
-        batch_tokens = [self.tokenizer.convert_ids_to_tokens(ids) for ids in input_ids_list]
+        # Get tokens for checking special tokens
+        batch_tokens = (
+            [self.tokenizer.convert_ids_to_tokens(ids) for ids in input_ids]
+            if is_batched else
+            self.tokenizer.convert_ids_to_tokens(input_ids)
+        )
 
-        # Fix the offsets for special tokens
-        for i, tokens in enumerate(batch_tokens):
-            for j, token in enumerate(tokens):
+        # Patch offsets for special tokens
+        if is_batched:
+            for i, tokens in enumerate(batch_tokens):
+                for j, token in enumerate(tokens):
+                    if token in self.special_tokens:
+                        offsets[i][j] = (None, None)
+        else:
+            for j, token in enumerate(batch_tokens):
                 if token in self.special_tokens:
-                    offsets_list[i][j] = (None, None)
+                    offsets[j] = (None, None)
 
-        # Patch offset mapping only — don't touch input_ids
-        encoding["offset_mapping"] = offsets_list if is_batched else offsets_list[0]
+        # Assign fixed offsets back
+        encoding["offset_mapping"] = offsets
 
         if not return_offsets_mapping:
             del encoding["offset_mapping"]
@@ -265,3 +274,43 @@ def reassign_member_indices(bio_tags):
         new_tags.append(tag)
 
     return new_tags
+
+# ---- Preprocess for inference in batch ----
+def preprocess_for_inference_batch(stmt_types, entity_annotated_texts, special_tokenizer, max_length=512):
+    """
+    Batch preprocessing of multiple (stmt_type, entity_annotated_text) pairs.
+    Returns:
+        Dictionary of input tensors and batch-level metadata
+    """
+    if not stmt_types or not entity_annotated_texts or len(stmt_types) != len(entity_annotated_texts):
+        return {
+            "input_ids": torch.empty(0, dtype=torch.long),
+            "attention_mask": torch.empty(0, dtype=torch.long),
+            "tokens": [],
+            "offsets": [],
+            "sequence_ids": []
+        }
+
+    encodings = special_tokenizer(
+        text=stmt_types,
+        text_pair=entity_annotated_texts,
+        return_offsets_mapping=True,
+        truncation=True,
+        max_length=max_length,
+        padding="longest",
+        add_special_tokens=True,
+        return_tensors="pt"
+    )
+
+    batch_tokens = [special_tokenizer.convert_ids_to_tokens(ids) for ids in encodings["input_ids"]]
+    batch_offsets = encodings["offset_mapping"]
+    batch_seq_ids = [encodings.sequence_ids(i) for i in range(len(stmt_types))]
+
+    return {
+        "input_ids": encodings["input_ids"],
+        "attention_mask": encodings["attention_mask"],
+        "tokens": batch_tokens,
+        "offsets": batch_offsets,
+        "sequence_ids": batch_seq_ids
+    }
+

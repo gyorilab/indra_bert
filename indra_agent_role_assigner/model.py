@@ -9,6 +9,7 @@ from indra_agent_role_assigner.preprocess import (
     reassign_member_indices,
     parse_and_generalize_tags,
     map_annotated_to_clean,
+    preprocess_for_inference_batch,
     SpecialTokenOffsetFixTokenizer
 )
 
@@ -174,3 +175,127 @@ class IndraAgentsTagger:
             "agents": agents,
             "role_spans": role_spans
         }
+    
+    def predict_tags_batch(self, stmt_types, entity_annotated_texts):
+        if not stmt_types:
+            return []
+        
+        enc = preprocess_for_inference_batch(stmt_types, entity_annotated_texts, self.tokenizer)
+
+        # If the batch is empty, skip model inference
+        if enc["input_ids"].shape[0] == 0:
+            return []
+    
+        input_ids = enc["input_ids"]
+        attention_mask = enc["attention_mask"]
+        tokens_batch = enc["tokens"]
+        offsets_batch = enc["offsets"]
+        seq_ids_batch = enc["sequence_ids"]
+
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            probs = F.softmax(outputs.logits, dim=-1)
+            predictions = torch.argmax(probs, dim=2)
+            confidences = torch.max(probs, dim=2).values
+
+        batch_results = []
+
+        for i in range(len(stmt_types)):
+            pred_ids = predictions[i]
+            confs = confidences[i]
+            tokens = tokens_batch[i]
+            offsets = offsets_batch[i]
+            seq_ids = seq_ids_batch[i]
+
+            labels = [
+                self.id2label[p.item()] if offsets[j] is not None and offsets[j] != (None, None) else "O"
+                for j, p in enumerate(pred_ids)
+            ]
+            conf_list = [c.item() for c in confs]
+
+            batch_results.append((labels, conf_list, tokens, offsets, seq_ids))
+
+        return batch_results
+
+    def predict_batch(self, stmt_types: list[str], annotated_texts: list[str]) -> list[dict]:
+        clean_and_tags = [parse_and_generalize_tags(t) for t in annotated_texts]
+        clean_texts = [x[0] for x in clean_and_tags]
+
+        tag_results = self.predict_tags_batch(stmt_types, annotated_texts)
+
+        results = []
+        for i, (bio_tags, confidences, tokens, offsets, seq_ids) in enumerate(tag_results):
+            clean_text = clean_texts[i]
+            offset_map = map_annotated_to_clean(annotated_texts[i], clean_text)
+
+            bio_tags = reassign_member_indices(bio_tags)
+
+            bio_tags = [
+                "O" if offset is None or offset == (None, None) else tag
+                for tag, offset in zip(bio_tags, offsets)
+            ]
+
+            # Map to clean spans
+            role_spans = []
+            open_role = None
+            role_start = None
+            prev_end = None
+
+            for tag, offset, sid in zip(bio_tags, offsets, seq_ids):
+                if sid != 1 or offset is None or offset == (0, 0):
+                    continue
+                start_char, end_char = offset
+                if start_char is None or end_char is None:
+                    continue
+                clean_start = offset_map.get(start_char)
+                clean_end = offset_map.get(end_char - 1)
+                if clean_start is None or clean_end is None:
+                    continue
+                clean_end += 1
+
+                if tag.startswith("B-"):
+                    if open_role is not None:
+                        role_spans.append({
+                            "role": open_role,
+                            "start": role_start,
+                            "end": prev_end,
+                            "text": clean_text[role_start:prev_end]
+                        })
+                    open_role = tag[2:]
+                    role_start = clean_start
+                elif tag.startswith("I-") and open_role:
+                    pass
+                else:
+                    if open_role is not None:
+                        role_spans.append({
+                            "role": open_role,
+                            "start": role_start,
+                            "end": prev_end,
+                            "text": clean_text[role_start:prev_end]
+                        })
+                        open_role = None
+                        role_start = None
+                prev_end = clean_end
+
+            if open_role and role_start is not None:
+                role_spans.append({
+                    "role": open_role,
+                    "start": role_start,
+                    "end": prev_end,
+                    "text": clean_text[role_start:prev_end]
+                })
+
+            agents = self.extract_agents(tokens, bio_tags, seq_ids)
+
+            results.append({
+                "stmt_type": stmt_types[i],
+                "text": annotated_texts[i],
+                "clean_text": clean_text,
+                "tokens": tokens,
+                "bio_tags": bio_tags,
+                "confidence": confidences,
+                "agents": agents,
+                "role_spans": role_spans
+            })
+
+        return results

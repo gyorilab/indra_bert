@@ -67,3 +67,16 @@ def preprocess_for_inference(text, tokenizer):
         padding="longest",
         add_special_tokens=True
     )
+
+def preprocess_for_inference_batch(texts: list[str], tokenizer, max_length=512):
+    """
+    Tokenize a batch of input texts for classification.
+    """
+    enc = tokenizer(
+        texts,
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt"
+    )
+    return enc

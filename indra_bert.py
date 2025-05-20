@@ -3,6 +3,7 @@ from ner_agent_detector.model import AgentNERModel
 from indra_stmt_classifier.model import IndraStmtClassifier
 from indra_agent_role_assigner.model import IndraAgentsTagger
 from utils.annotate import annotate_entities
+from typing import List
 
 class IndraStructuredExtractor:
     def __init__(self, ner_model_path, stmt_model_path, role_model_path, stmt_conf_threshold=0.95):
@@ -52,6 +53,73 @@ class IndraStructuredExtractor:
 
         return stmts
 
+
+    def extract_structured_statements_batch(self, text_list: List[str]):
+        """Efficiently process multiple texts using batching at each pipeline step."""
+        all_statements = []
+
+        # STEP 1: Run NER in batch
+        ner_preds_batch = self.ner_model.predict_batch(text_list)
+
+        # For each text, get entity pairs and prepare annotated texts for classification
+        stmt_inputs = []
+        stmt_pair_info = []
+        for text, ner_preds in zip(text_list, ner_preds_batch):
+            pairs = self.get_entity_pairs(ner_preds)
+            for pair in pairs:
+                annotated_text = annotate_entities(text, pair)
+                stmt_inputs.append(annotated_text)
+                stmt_pair_info.append((text, pair, ner_preds))  # to keep track later
+
+        # STEP 2: Run statement classification in batch
+        if not stmt_inputs:
+            return []
+        stmt_preds_batch = self.stmt_model.predict_batch(stmt_inputs)
+
+        # Filter by confidence and collect inputs for role prediction
+        role_inputs_text = []
+        role_inputs_type = []
+        final_pairs = []
+
+        for i, stmt_pred in enumerate(stmt_preds_batch):
+            conf = stmt_pred.get('confidence', 0.0)
+            if conf >= self.stmt_conf_threshold:
+                role_inputs_text.append(stmt_inputs[i])
+                role_inputs_type.append(stmt_pred['predicted_label'])
+                final_pairs.append((stmt_pred, stmt_pair_info[i]))
+
+        # STEP 3: Run role assignment in batch
+        role_preds_batch = self.role_model.predict_batch(role_inputs_type, role_inputs_text)
+
+        # STEP 4: Assemble final results
+        for stmt_pred, (text, pair, ner_preds), role_pred in zip(
+                [x[0] for x in final_pairs],
+                [x[1] for x in final_pairs],
+                role_preds_batch):
+
+            stmt = {
+                'original_text': text,
+                'entity_pair': pair,
+                'annotated_text': annotate_entities(text, pair),
+                'ner_info': {
+                    'all_entities': ner_preds['entity_spans'],
+                    'entity_pair': pair
+                },
+                'stmt_pred': {
+                    'label': stmt_pred['predicted_label'],
+                    'confidence': stmt_pred['confidence'],
+                    'raw_output': stmt_pred
+                },
+                'role_pred': {
+                    'roles': role_pred.get('role_spans', []),
+                    'raw_output': role_pred
+                }
+            }
+
+            all_statements.append(stmt)
+
+        return all_statements
+    
     def get_json_indra_stmts(self, text, source_api="indra_bert"):
         """Extract statements and convert to INDRA-style JSON with agent coords."""
         structured_statements = self.extract_structured_statements(text)
@@ -59,7 +127,6 @@ class IndraStructuredExtractor:
 
         for stmt in structured_statements:
             stmt_type = stmt['stmt_pred']['label']
-            confidence = stmt['stmt_pred']['confidence']
             roles = stmt['role_pred']['roles']
 
             agent_roles = {}
@@ -84,7 +151,53 @@ class IndraStructuredExtractor:
             indra_stmt = {
                 "type": stmt_type,
                 **agent_roles,
-                "belief": confidence,
+                "evidence": [{
+                    "source_api": source_api,
+                    "text": stmt['original_text'],
+                    "annotations": {
+                        "agents": {
+                            "raw_text": raw_texts,
+                            "coords": coords
+                        }
+                    }
+                }]
+            }
+
+            indra_statements.append(indra_stmt)
+
+        return indra_statements
+
+
+    def get_json_indra_stmts_batch(self, text_list: List[str], source_api="indra_bert"):
+        structured_statements = self.extract_structured_statements_batch(text_list)
+        indra_statements = []
+
+        for stmt in structured_statements:
+            stmt_type = stmt['stmt_pred']['label']
+            roles = stmt['role_pred']['roles']
+
+            agent_roles = {}
+            raw_texts = []
+            coords = []
+
+            for role_info in roles:
+                role = role_info['role']
+                name = role_info['text']
+                start = role_info['start']
+                end = role_info['end']
+                raw_texts.append(name)
+                coords.append([start, end])
+
+                agent_roles[role] = {
+                    "name": name,
+                    "db_refs": {
+                        "TEXT": name
+                    }
+                }
+
+            indra_stmt = {
+                "type": stmt_type,
+                **agent_roles,
                 "evidence": [{
                     "source_api": source_api,
                     "text": stmt['original_text'],
