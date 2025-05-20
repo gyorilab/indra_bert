@@ -1,8 +1,8 @@
 from transformers import AutoTokenizer
 import torch
 from pathlib import Path
-from indra_stmt_classifier.preprocess import preprocess_for_inference, preprocess_for_inference_batch
-from indra_stmt_classifier.bert_classification_head import BertForIndraStmtClassification
+from .preprocess import preprocess_for_inference, preprocess_for_inference_batch
+from .bert_classification_head import BertForIndraStmtClassification
 
 
 class IndraStmtClassifier:

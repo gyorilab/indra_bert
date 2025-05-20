@@ -1,7 +1,7 @@
 from transformers import AutoTokenizer, AutoModelForTokenClassification
 import torch
-from ner_agent_detector.preprocess import preprocess_for_inference
-from ner_agent_detector.postprocess import extract_spans_from_encoding
+from .preprocess import preprocess_for_inference
+from .postprocess import extract_spans_from_encoding
 
 class AgentNERModel:
     def __init__(self, model_path: str):

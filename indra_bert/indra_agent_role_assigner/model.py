@@ -4,7 +4,7 @@ import torch
 from collections import defaultdict
 from pathlib import Path
 
-from indra_agent_role_assigner.preprocess import (
+from .preprocess import (
     preprocess_for_inference,
     reassign_member_indices,
     parse_and_generalize_tags,

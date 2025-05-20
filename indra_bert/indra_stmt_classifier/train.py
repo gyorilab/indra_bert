@@ -7,12 +7,12 @@ from datasets import Dataset
 from transformers import AutoTokenizer, TrainingArguments
 from sklearn.metrics import precision_recall_fscore_support
 
-from indra_stmt_classifier.bert_classification_head import BertForIndraStmtClassification
-from indra_stmt_classifier.preprocess import (
+from .bert_classification_head import BertForIndraStmtClassification
+from .preprocess import (
     load_and_preprocess_raw_data,
     preprocess_examples_for_model,
 )
-from indra_stmt_classifier.weighted_trainer import WeightedTrainer, compute_class_weights
+from .weighted_trainer import WeightedTrainer, compute_class_weights
 
 
 def compute_metrics(p):

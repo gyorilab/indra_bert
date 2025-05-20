@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, AutoModelForTokenClassification, Trainer
 from sklearn.metrics import precision_recall_fscore_support
 
 
-from indra_agent_role_assigner.preprocess import (
+from .preprocess import (
     load_and_preprocess_from_raw_data,
     build_label_mappings,
     preprocess_examples_from_dataset,

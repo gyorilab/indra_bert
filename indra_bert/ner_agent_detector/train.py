@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, AutoModelForTokenClassification, Trainer
 from functools import partial
 from transformers import EvalPrediction
 
-from ner_agent_detector.preprocess import (
+from .preprocess import (
     load_and_preprocess_from_raw_data,
     build_label_mappings,
     preprocess_examples
@@ -18,7 +18,7 @@ from transformers import DataCollatorForTokenClassification
 from typing import Any, Dict, List
 import torch
 
-from ner_agent_detector.postprocess import extract_spans_from_encoding
+from .postprocess import extract_spans_from_encoding
 
 # ---- Data Collator ----
 class DataCollatorWithDebug(DataCollatorForTokenClassification):
