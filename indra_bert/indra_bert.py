@@ -21,59 +21,62 @@ class IndraStructuredExtractor:
 
     def extract_structured_statements(self, text):
         stmts = []
-        entity_preds = self.ner_model.predict(text)
-        pairs = self.get_entity_pairs(entity_preds)
+        sentences = self.sentence_tokenize(text, mode='nltk')
+        for sentence in sentences:
+            entity_preds = self.ner_model.predict(sentence)
+            pairs = self.get_entity_pairs(entity_preds)
 
-        for pair in pairs:
-            annotated_text = annotate_entities(text, pair)
-            stmt_pred = self.stmt_model.predict(annotated_text)
-            stmt_conf = stmt_pred.get('confidence', 0.0)
+            for pair in pairs:
+                annotated_text = annotate_entities(sentence, pair)
+                stmt_pred = self.stmt_model.predict(annotated_text)
+                stmt_conf = stmt_pred.get('confidence', 0.0)
 
-            if stmt_conf < self.stmt_conf_threshold:
-                continue
+                if stmt_conf < self.stmt_conf_threshold:
+                    continue
 
-            role_pred = self.role_model.predict(stmt_pred['predicted_label'], annotated_text)
+                role_pred = self.role_model.predict(stmt_pred['predicted_label'], annotated_text)
 
-            stmt = {
-                'original_text': text,
-                'entity_pair': pair,
-                'annotated_text': annotated_text,
-                'ner_info': {
-                    'all_entities': entity_preds['entity_spans'],
-                    'entity_pair': pair
-                },
-                'stmt_pred': {
-                    'label': stmt_pred['predicted_label'],
-                    'confidence': stmt_conf,
-                    'raw_output': stmt_pred
-                },
-                'role_pred': {
-                    'roles': role_pred.get('role_spans', []),
-                    'raw_output': role_pred
+                stmt = {
+                    'original_text': sentence,
+                    'entity_pair': pair,
+                    'annotated_text': annotated_text,
+                    'ner_info': {
+                        'all_entities': entity_preds['entity_spans'],
+                        'entity_pair': pair
+                    },
+                    'stmt_pred': {
+                        'label': stmt_pred['predicted_label'],
+                        'confidence': stmt_conf,
+                        'raw_output': stmt_pred
+                    },
+                    'role_pred': {
+                        'roles': role_pred.get('role_spans', []),
+                        'raw_output': role_pred
+                    }
                 }
-            }
 
-            stmts.append(stmt)
+                stmts.append(stmt)
 
         return stmts
 
 
-    def extract_structured_statements_batch(self, text_list: List[str]):
+    def extract_structured_statements_batch(self, text):
         """Efficiently process multiple texts using batching at each pipeline step."""
         all_statements = []
 
         # STEP 1: Run NER in batch
-        ner_preds_batch = self.ner_model.predict_batch(text_list)
+        sentences = self.sentence_tokenize(text, mode='nltk')
+        ner_preds_batch = self.ner_model.predict_batch(sentences)
 
-        # For each text, get entity pairs and prepare annotated texts for classification
+        # For each sentence, get entity pairs and prepare annotated texts for classification
         stmt_inputs = []
         stmt_pair_info = []
-        for text, ner_preds in zip(text_list, ner_preds_batch):
+        for sentence, ner_preds in zip(sentences, ner_preds_batch):
             pairs = self.get_entity_pairs(ner_preds)
             for pair in pairs:
-                annotated_text = annotate_entities(text, pair)
+                annotated_text = annotate_entities(sentence, pair)
                 stmt_inputs.append(annotated_text)
-                stmt_pair_info.append((text, pair, ner_preds))  # to keep track later
+                stmt_pair_info.append((sentence, pair, ner_preds))  # to keep track later
 
         # STEP 2: Run statement classification in batch
         if not stmt_inputs:
@@ -217,3 +220,16 @@ class IndraStructuredExtractor:
             indra_statements.append(indra_stmt)
 
         return indra_statements
+    
+    def sentence_tokenize(self, text, mode='nltk'):
+        """Tokenize text into sentences using the specified mode."""
+        if mode == 'nltk':
+            from nltk.tokenize import sent_tokenize
+            return sent_tokenize(text)
+        elif mode == 'spacy':
+            import spacy
+            nlp = spacy.load("en_core_web_sm")
+            doc = nlp(text)
+            return [sent.text for sent in doc.sents]
+        else:
+            raise ValueError("Unsupported tokenization mode. Use 'nltk' or 'spacy'.")
