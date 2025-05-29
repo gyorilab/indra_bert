@@ -3,7 +3,7 @@ from pathlib import Path
 from datetime import datetime
 
 import numpy as np
-from datasets import Dataset
+from datasets import Dataset, concatenate_datasets
 from transformers import AutoTokenizer, TrainingArguments
 from sklearn.metrics import precision_recall_fscore_support
 
@@ -11,6 +11,7 @@ from .bert_classification_head import BertForIndraStmtClassification
 from .preprocess import (
     load_and_preprocess_raw_data,
     preprocess_examples_for_model,
+    preprocess_negative_examples_for_model
 )
 from .weighted_trainer import WeightedTrainer, compute_class_weights
 
@@ -50,15 +51,62 @@ def main(args):
     test_dataset = val_test_split["test"]
 
     # ---- Tokenize datasets ----
-    train_dataset = train_dataset.map(
+    train_dataset_positive = train_dataset.map(
         lambda x: preprocess_examples_for_model(x, tokenizer), batched=True
     )
-    val_dataset = val_dataset.map(
+    val_dataset_positive = val_dataset.map(
         lambda x: preprocess_examples_for_model(x, tokenizer), batched=True
     )
-    test_dataset = test_dataset.map(
+    test_dataset_positive = test_dataset.map(
         lambda x: preprocess_examples_for_model(x, tokenizer), batched=True
     )
+    # ---- Preprocess negative examples ----
+    train_dataset_negative = train_dataset.map(
+        preprocess_negative_examples_for_model,
+        batched=True,
+        remove_columns=train_dataset.column_names,
+        fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
+    )
+    val_dataset_negative = val_dataset.map(
+        preprocess_negative_examples_for_model,
+        batched=True,
+        remove_columns=val_dataset.column_names,
+        fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
+    )
+    test_dataset_negative = test_dataset.map(
+        preprocess_negative_examples_for_model,
+        batched=True,
+        remove_columns=test_dataset.column_names,
+        fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
+    )
+    # ---- Sample negative examples ----
+    k = 1  # Number of negative examples per positive example
+
+    num_positives_train = len(train_dataset_positive)
+    num_positives_val = len(val_dataset_positive)
+    num_positives_test = len(test_dataset_positive)
+
+    train_dataset_negative_sampled = (train_dataset_negative.shuffle(seed=42).
+                                      select(range(min(len(train_dataset_negative), k * num_positives_train))))
+    val_dataset_negative_sampled = (val_dataset_negative.shuffle(seed=42).
+                                      select(range(min(len(val_dataset_negative), k * num_positives_val))))
+    test_dataset_negative_sampled = (test_dataset_negative.shuffle(seed=42).
+                                      select(range(min(len(test_dataset_negative), k * num_positives_test))))
+
+    # Shuffle and concatenate positive and negative examples
+    train_dataset = concatenate_datasets([train_dataset_positive, train_dataset_negative_sampled])
+    val_dataset = concatenate_datasets([val_dataset_positive, val_dataset_negative_sampled])
+    test_dataset = concatenate_datasets([test_dataset_positive, test_dataset_negative_sampled])
+
+    # Shuffle the datasets
+    train_dataset = train_dataset.shuffle(seed=42)
+    val_dataset = val_dataset.shuffle(seed=42)
+    test_dataset = test_dataset.shuffle(seed=42)
+
+    # ---- Log dataset sizes ----
+    from collections import Counter
+    label_counts = Counter(train_dataset["labels"])
+    print("Label distribution in training data:", label_counts) 
 
     # ---- Model ----
     model = BertForIndraStmtClassification.from_pretrained_with_labels(

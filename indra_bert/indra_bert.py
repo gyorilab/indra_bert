@@ -10,7 +10,11 @@ from .utils.annotate import annotate_entities
 
 
 class IndraStructuredExtractor:
-    def __init__(self, ner_model_path, stmt_model_path, role_model_path, stmt_conf_threshold=0.95):
+    def __init__(self, 
+                 ner_model_path="thomaslim6793/indra_bert_ner_agent_detection",
+                 stmt_model_path="thomaslim6793/indra_bert_indra_stmt_classifier", 
+                 role_model_path="thomaslim6793/indra_bert_indra_stmt_agents_role_assigner", 
+                 stmt_conf_threshold=0.95):
         self.ner_model = AgentNERModel(ner_model_path)
         self.stmt_model = IndraStmtClassifier(stmt_model_path)
         self.role_model = IndraAgentsTagger(role_model_path)
