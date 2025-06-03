@@ -11,7 +11,9 @@ class BertForIndraStmtClassification(PreTrainedModel):
 
         self.bert = AutoModel.from_config(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+
+        self.entity_proj = nn.Linear(4 * config.hidden_size, config.hidden_size)
+        self.classifier = nn.Linear(3 * config.hidden_size, config.num_labels)
 
         self.post_init()
 
@@ -42,20 +44,32 @@ class BertForIndraStmtClassification(PreTrainedModel):
             token_type_ids=token_type_ids
         )
 
-        last_hidden = outputs.last_hidden_state  # shape: [B, T, H]
+        last_hidden = outputs.last_hidden_state  # [B, T, H]
         batch_size = input_ids.size(0)
         hidden_size = last_hidden.size(-1)
 
-        entity_repr = torch.zeros(batch_size, hidden_size).to(last_hidden.device)
-        for i in range(batch_size):
-            spans = entity_token_spans[i]  # list of [start, end]
-            span_embeddings = [last_hidden[i, start:end].mean(dim=0) for start, end in spans if end > start]
-            if span_embeddings:
-                entity_repr[i] = torch.stack(span_embeddings, dim=0).mean(dim=0)
+        cls_embeddings = last_hidden[:, 0, :]  # [B, H]
+        entity_repr = last_hidden.new_zeros(batch_size, hidden_size)
 
-        pooled_output = self.dropout(entity_repr)  # shape: [B, H]
+        for i in range(batch_size):
+            spans = entity_token_spans[i]  # list of (start, end)
+            span_embeddings = [
+                torch.cat((last_hidden[i, start], last_hidden[i, end - 1]), dim=-1)
+                for start, end in spans
+            ]
+            if span_embeddings:
+                span_stack = torch.stack(span_embeddings, dim=0)
+                span_mean = span_stack.mean(dim=0)
+                span_max = span_stack.max(dim=0).values
+                entity_repr[i] = self.entity_proj(torch.cat([span_mean, span_max], dim=-1))  # [4 * hidden_size]
+
+        abs_diff = torch.abs(entity_repr - cls_embeddings)  # [B, 2H]
+        relation_repr = torch.cat([
+            cls_embeddings, entity_repr, abs_diff
+        ], dim=-1)
+
+        pooled_output = self.dropout(relation_repr)
         logits = self.classifier(pooled_output)
-        ### --- END DIFF ---
 
         loss = None
         if labels is not None:
