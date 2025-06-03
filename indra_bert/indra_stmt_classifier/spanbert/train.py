@@ -7,7 +7,7 @@ from datasets import Dataset, concatenate_datasets
 from transformers import AutoTokenizer, TrainingArguments
 from sklearn.metrics import precision_recall_fscore_support
 
-from .bert_classification_head import BertForIndraStmtClassification
+from .bert_classification_head import SpanBertForIndraStmtClassification
 from .preprocess import (
     load_and_preprocess_raw_data,
     preprocess_examples_for_model,
@@ -126,7 +126,7 @@ def main(args):
     print("Label distribution in training data:", label_counts) 
 
     # ---- Model ----
-    model = BertForIndraStmtClassification.from_pretrained_with_labels(
+    model = SpanBertForIndraStmtClassification.from_pretrained_with_labels(
         pretrained_model_name=args.model_name,
         label2id=stmt2id,
         id2label=id2stmt,
