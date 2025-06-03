@@ -37,6 +37,8 @@ class IndraStructuredExtractor:
 
                 if stmt_conf < self.stmt_conf_threshold:
                     continue
+                if stmt_pred['predicted_label'] == "No_Relation":
+                    continue
 
                 role_pred = self.role_model.predict(stmt_pred['predicted_label'], annotated_text)
 
@@ -107,6 +109,9 @@ class IndraStructuredExtractor:
                 [x[0] for x in final_pairs],
                 [x[1] for x in final_pairs],
                 role_preds_batch):
+            
+            if stmt_pred['predicted_label'] == "No_Relation":
+                continue
 
             stmt = {
                 'original_text': text,
@@ -138,6 +143,10 @@ class IndraStructuredExtractor:
 
         for stmt in structured_statements:
             stmt_type = stmt['stmt_pred']['label']
+
+            if stmt_type== "No_Relation":
+                continue
+
             roles = stmt['role_pred']['roles']
 
             agent_roles = {}
@@ -185,6 +194,10 @@ class IndraStructuredExtractor:
 
         for stmt in structured_statements:
             stmt_type = stmt['stmt_pred']['label']
+
+            if stmt_type== "No_Relation":
+                continue
+
             roles = stmt['role_pred']['roles']
 
             agent_roles = {}

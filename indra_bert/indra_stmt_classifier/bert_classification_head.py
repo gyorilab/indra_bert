@@ -61,9 +61,9 @@ class BertForIndraStmtClassification(PreTrainedModel):
                 span_stack = torch.stack(span_embeddings, dim=0)
                 span_mean = span_stack.mean(dim=0)
                 span_max = span_stack.max(dim=0).values
-                entity_repr[i] = self.entity_proj(torch.cat([span_mean, span_max], dim=-1))  # [4 * hidden_size]
+                entity_repr[i] = self.entity_proj(torch.cat([span_mean, span_max], dim=-1))  
 
-        abs_diff = torch.abs(entity_repr - cls_embeddings)  # [B, 2H]
+        abs_diff = torch.abs(entity_repr - cls_embeddings)  # [B, H]
         relation_repr = torch.cat([
             cls_embeddings, entity_repr, abs_diff
         ], dim=-1)
