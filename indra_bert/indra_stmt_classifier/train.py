@@ -15,6 +15,25 @@ from .preprocess import (
 )
 from .weighted_trainer import WeightedTrainer, compute_class_weights
 
+from transformers import DataCollatorWithPadding
+
+class DataCollatorWithEntitySpans:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.default_collator = DataCollatorWithPadding(tokenizer)
+
+    def __call__(self, features):
+        # Separate entity token spans from the rest
+        entity_token_spans = [f.pop("entity_token_spans") for f in features]
+
+        # Let the default collator handle everything else
+        batch = self.default_collator(features)
+
+        # Now manually add back variable-length entity_token_spans (still list[list[list[int]]])
+        batch["entity_token_spans"] = entity_token_spans
+
+        return batch
+
 
 def compute_metrics(p):
     preds = np.argmax(p.predictions, axis=1)
@@ -80,18 +99,18 @@ def main(args):
         fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
     )
     # ---- Sample negative examples ----
-    k = 1  # Number of negative examples per positive example
+    k = 0.08  # Number of negative examples per positive example
 
     num_positives_train = len(train_dataset_positive)
     num_positives_val = len(val_dataset_positive)
     num_positives_test = len(test_dataset_positive)
 
     train_dataset_negative_sampled = (train_dataset_negative.shuffle(seed=42).
-                                      select(range(min(len(train_dataset_negative), k * num_positives_train))))
+                                      select(range(min(len(train_dataset_negative), int(k * num_positives_train)))))
     val_dataset_negative_sampled = (val_dataset_negative.shuffle(seed=42).
-                                      select(range(min(len(val_dataset_negative), k * num_positives_val))))
+                                      select(range(min(len(val_dataset_negative), int(k * num_positives_val)))))
     test_dataset_negative_sampled = (test_dataset_negative.shuffle(seed=42).
-                                      select(range(min(len(test_dataset_negative), k * num_positives_test))))
+                                      select(range(min(len(test_dataset_negative), int(k * num_positives_test)))))
 
     # Shuffle and concatenate positive and negative examples
     train_dataset = concatenate_datasets([train_dataset_positive, train_dataset_negative_sampled])
@@ -126,13 +145,14 @@ def main(args):
         learning_rate=2e-5,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        num_train_epochs=10,
+        num_train_epochs=15,
         weight_decay=0.01,
         save_total_limit=1,
         logging_dir="./logs",
     )
 
     class_weights = compute_class_weights(train_dataset)
+    data_collator = DataCollatorWithEntitySpans(tokenizer)
 
     trainer = WeightedTrainer(
         model=model,
@@ -140,6 +160,7 @@ def main(args):
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         tokenizer=tokenizer,
+        data_collator=data_collator,
         compute_metrics=compute_metrics,
         class_weights=class_weights,
     )

@@ -26,8 +26,14 @@ class IndraStmtClassifier:
         input_ids = enc["input_ids"].to(self.device)
         attention_mask = enc["attention_mask"].to(self.device)
 
+        entity_token_spans = enc["entity_token_spans"]
+
         with torch.no_grad():
-            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                entity_token_spans=entity_token_spans
+            )
             logits = outputs.logits
             probs = torch.softmax(logits, dim=-1)
             confidence, predicted_class = probs.max(dim=-1)
@@ -41,10 +47,15 @@ class IndraStmtClassifier:
             "probabilities": prob_dist,
             "input_ids": enc["input_ids"],
             "decoded_text": self.tokenizer.decode(enc["input_ids"].squeeze()),
-            "original_text": text
+            "original_text": text,
+            "entity_spans": enc.get("entity_spans", None),
+            "offset_mapping": enc.get("offset_mapping", None)
         }
 
     def predict_batch(self, texts: list[str]):
+        assert isinstance(texts, list) and len(texts) > 0, "Input must be a non-empty list of strings."
+        assert all(isinstance(text, str) for text in texts), "All elements in the input list must be strings."
+
         # Step 1: Batch tokenization
         enc = preprocess_for_inference_batch(
             texts=texts,
@@ -54,15 +65,21 @@ class IndraStmtClassifier:
         input_ids = enc["input_ids"].to(self.device)
         attention_mask = enc["attention_mask"].to(self.device)
 
+        entity_token_spans = enc["entity_token_spans"]
         # Step 2: Model inference
         with torch.no_grad():
-            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                entity_token_spans=entity_token_spans
+            )
             logits = outputs.logits  # shape: (batch_size, num_classes)
             probs = torch.softmax(logits, dim=-1)
             confidences, predicted_classes = probs.max(dim=-1)
 
         results = []
         for i in range(len(texts)):
+
             predicted_label = self.id2label[int(predicted_classes[i].item())]
             confidence = confidences[i].item()
             prob_dist = {
@@ -75,7 +92,9 @@ class IndraStmtClassifier:
                 "probabilities": prob_dist,
                 "input_ids": input_ids[i],
                 "decoded_text": self.tokenizer.decode(input_ids[i]),
-                "original_text": texts[i]
+                "original_text": texts[i],
+                "entity_spans": enc.get("entity_spans", None)[i] if "entity_spans" in enc else None,
+                "offset_mapping": enc.get("offset_mapping", None)[i] if "offset_mapping" in enc else None
             })
 
         return results

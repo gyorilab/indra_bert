@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoConfig, PreTrainedModel, BertConfig
 from transformers.modeling_outputs import SequenceClassifierOutput
@@ -33,15 +34,28 @@ class BertForIndraStmtClassification(PreTrainedModel):
         model.bert = AutoModel.from_pretrained(pretrained_model_name, config=config)
         return model
 
-    def forward(self, input_ids, attention_mask=None, token_type_ids=None, labels=None):
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None, labels=None,
+                entity_token_spans=None):
         outputs = self.bert(
             input_ids=input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids
         )
 
-        pooled_output = self.dropout(outputs.last_hidden_state[:, 0])
+        last_hidden = outputs.last_hidden_state  # shape: [B, T, H]
+        batch_size = input_ids.size(0)
+        hidden_size = last_hidden.size(-1)
+
+        entity_repr = torch.zeros(batch_size, hidden_size).to(last_hidden.device)
+        for i in range(batch_size):
+            spans = entity_token_spans[i]  # list of [start, end]
+            span_embeddings = [last_hidden[i, start:end].mean(dim=0) for start, end in spans if end > start]
+            if span_embeddings:
+                entity_repr[i] = torch.stack(span_embeddings, dim=0).mean(dim=0)
+
+        pooled_output = self.dropout(entity_repr)  # shape: [B, H]
         logits = self.classifier(pooled_output)
+        ### --- END DIFF ---
 
         loss = None
         if labels is not None:
