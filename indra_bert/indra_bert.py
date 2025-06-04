@@ -4,9 +4,13 @@ from typing import List
 from itertools import combinations
 
 from .ner_agent_detector.model import AgentNERModel
-from .indra_stmt_classifier.model import IndraStmtClassifier
+from .indra_stmt_classifier.model import IndraStmtClassifier as BertIndraStmtClassifier
+from .indra_stmt_classifier.spanbert.model import IndraStmtClassifier as SpanIndraStmtClassifier
+
 from .indra_agent_role_assigner.model import IndraAgentsTagger
 from .utils.annotate import annotate_entities
+import logging
+logger = logging.getLogger(__name__)
 
 
 class IndraStructuredExtractor:
@@ -16,7 +20,11 @@ class IndraStructuredExtractor:
                  role_model_path="thomaslim6793/indra_bert_indra_stmt_agents_role_assigner", 
                  stmt_conf_threshold=0.95):
         self.ner_model = AgentNERModel(ner_model_path)
-        self.stmt_model = IndraStmtClassifier(stmt_model_path)
+        try:
+            self.stmt_model = BertIndraStmtClassifier(stmt_model_path)
+        except Exception as e:
+            logger.warning(f"Failed to load BertIndraStmtClassifier, falling back to SpanIndraStmtClassifier: {e}")
+            self.stmt_model = SpanIndraStmtClassifier(stmt_model_path)
         self.role_model = IndraAgentsTagger(role_model_path)
         self.stmt_conf_threshold = stmt_conf_threshold
 
