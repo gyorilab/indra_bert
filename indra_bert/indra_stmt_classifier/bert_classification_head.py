@@ -32,6 +32,7 @@ class BertForIndraStmtClassification(PreTrainedModel):
             id2label=id2label,
             **kwargs
         )
+        config.pretrained_model_name_or_path = pretrained_model_name
         model = cls(config)
         model.bert = AutoModel.from_pretrained(pretrained_model_name, config=config)
         return model
