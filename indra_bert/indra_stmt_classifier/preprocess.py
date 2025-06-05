@@ -126,63 +126,72 @@ def preprocess_negative_examples_for_model(batch, stmt2id, tokenizer):
     ner_texts = batch["ner_pred_annotated_text"]
 
     for gold_text, ner_pred_text in zip(texts, ner_texts):
-
         gold_spans = extract_entity_spans(gold_text)
         ner_spans = extract_entity_spans(ner_pred_text)
         raw_text = re.sub(r"</?e>", "", gold_text)
 
+        gold_span_texts = {span["text"] for span in gold_spans}
+
         for i in range(len(ner_spans)):
             for j in range(i + 1, len(ner_spans)):
                 span1, span2 = ner_spans[i], ner_spans[j]
+                text1, text2 = span1["text"], span2["text"]
 
-                # Reject only if BOTH candidate spans overlap with the gold pair
-                if all(any(spans_overlap(span, g) for g in gold_spans) for span in (span1, span2)):
-                    continue
+                # Ensure exactly one span matches gold by text (not just overlap)
+                in_gold_1 = text1 in gold_span_texts
+                in_gold_2 = text2 in gold_span_texts
 
-                for ent1, ent2 in [(span1['text'], span2['text']), (span2['text'], span1['text'])]:
-                    try:
-                        temp_text = raw_text
-                        temp_text = re.sub(rf"\b{re.escape(ent1)}\b", f"<e>{ent1}</e>", temp_text, count=1)
-                        temp_text = re.sub(rf"\b{re.escape(ent2)}\b", f"<e>{ent2}</e>", temp_text, count=1)
+                if in_gold_1 ^ in_gold_2:  # XOR logic: exactly one is gold
 
-                        if temp_text.count("<e>") != 2:
-                            continue
-
-                        enc = tokenizer(
-                            temp_text,
-                            truncation=True,
-                            max_length=512,
-                            padding=False,
-                            add_special_tokens=True,
-                            return_token_type_ids=True,
-                            return_offsets_mapping=True
-                        )
-
-                        new_spans = extract_entity_spans(temp_text)
-                        if len(new_spans) != 2:
-                            continue  # Something went wrong with tagging
-                        # These are now the correct spans
-                        entity_char_spans = [[s["start"], s["end"]] for s in new_spans]
-                        
-                        token_spans = [map_char_span_to_token_span(span, enc["offset_mapping"]) for span in entity_char_spans]
-
-                        if None in token_spans:
-                            logger.error(f"Invalid token spans for text: {temp_text}",
-                                         f" entity_char_spans: {entity_char_spans}, offset_mapping: {enc['offset_mapping']}")
-
-                        negative_examples.append({
-                            "input_ids": enc["input_ids"],
-                            "attention_mask": enc["attention_mask"],
-                            "token_type_ids": enc.get("token_type_ids", [0] * len(enc["input_ids"])),
-                            "labels": stmt2id["No_Relation"],
-                            "stmt_label": "No_Relation",
-                            "entity_char_spans": entity_char_spans,
-                            "entity_token_spans": token_spans
-                        })
-                        break  # accept first valid insertion only
-                    except Exception as e:
-                        logger.error(f"Error processing negative example: {e}")
+                    # Skip if distractor has any text overlap with other golds
+                    distractor = text1 if not in_gold_1 else text2
+                    if any(distractor in g or g in distractor for g in gold_span_texts):
                         continue
+
+                    for ent1, ent2 in [(text1, text2), (text2, text1)]:
+                        try:
+                            temp_text = raw_text
+                            temp_text = re.sub(rf"\b{re.escape(ent1)}\b", f"<e>{ent1}</e>", temp_text, count=1)
+                            temp_text = re.sub(rf"\b{re.escape(ent2)}\b", f"<e>{ent2}</e>", temp_text, count=1)
+
+                            if temp_text.count("<e>") != 2:
+                                continue
+
+                            enc = tokenizer(
+                                temp_text,
+                                truncation=True,
+                                max_length=512,
+                                padding=False,
+                                add_special_tokens=True,
+                                return_token_type_ids=True,
+                                return_offsets_mapping=True
+                            )
+
+                            new_spans = extract_entity_spans(temp_text)
+                            if len(new_spans) != 2:
+                                continue
+
+                            entity_char_spans = [[s["start"], s["end"]] for s in new_spans]
+                            token_spans = [map_char_span_to_token_span(span, enc["offset_mapping"]) for span in entity_char_spans]
+
+                            if None in token_spans:
+                                logger.error(f"Invalid token spans for text: {temp_text}",
+                                             f" entity_char_spans: {entity_char_spans}, offset_mapping: {enc['offset_mapping']}")
+                                continue
+
+                            negative_examples.append({
+                                "input_ids": enc["input_ids"],
+                                "attention_mask": enc["attention_mask"],
+                                "token_type_ids": enc.get("token_type_ids", [0] * len(enc["input_ids"])),
+                                "labels": stmt2id["No_Relation"],
+                                "stmt_label": "No_Relation",
+                                "entity_char_spans": entity_char_spans,
+                                "entity_token_spans": token_spans
+                            })
+                            break  # accept only the first valid form
+                        except Exception as e:
+                            logger.error(f"Error processing hard negative: {e}")
+                            continue
 
     if not negative_examples:
         return {"input_ids": [], "attention_mask": [], "labels": [], "stmt_label": []}

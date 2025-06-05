@@ -99,7 +99,7 @@ def main(args):
         fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
     )
     # ---- Sample negative examples ----
-    k = 0.08  # Number of negative examples per positive example
+    k = 0.15  # Number of negative examples per positive example
 
     num_positives_train = len(train_dataset_positive)
     num_positives_val = len(val_dataset_positive)
@@ -145,7 +145,7 @@ def main(args):
         learning_rate=2e-5,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        num_train_epochs=15,
+        num_train_epochs=10,
         weight_decay=0.01,
         save_total_limit=1,
         logging_dir="./logs",
