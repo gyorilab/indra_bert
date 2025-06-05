@@ -38,10 +38,20 @@ class DataCollatorWithEntitySpans:
 def compute_metrics(p):
     preds = np.argmax(p.predictions, axis=1)
     labels = p.label_ids
-    precision, recall, f1, _ = precision_recall_fscore_support(
+    precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(
         labels, preds, average="macro", zero_division=0
     )
-    return {"precision": precision, "recall": recall, "f1": f1}
+    precision_weighted, recall_weighted, f1_weighted, _ = precision_recall_fscore_support(
+        labels, preds, average="weighted", zero_division=0
+    )
+    return {
+        "precision_macro": precision_macro,
+        "recall_macro": recall_macro,
+        "f1_macro": f1_macro,
+        "precision_weighted": precision_weighted,
+        "recall_weighted": recall_weighted,
+        "f1_weighted": f1_weighted,
+    }
 
 
 def main(args):
@@ -99,7 +109,7 @@ def main(args):
         fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
     )
     # ---- Sample negative examples ----
-    k = 0.15  # Number of negative examples per positive example
+    k = 2  # Number of negative examples per positive example
 
     num_positives_train = len(train_dataset_positive)
     num_positives_val = len(val_dataset_positive)
@@ -145,7 +155,7 @@ def main(args):
         learning_rate=2e-5,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        num_train_epochs=10,
+        num_train_epochs=8,
         weight_decay=0.01,
         save_total_limit=1,
         logging_dir="./logs",

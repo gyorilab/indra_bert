@@ -43,7 +43,7 @@ def load_and_preprocess_raw_data(input_path):
 
                 examples.append({
                     "id": idx,
-                    "text": annotated_text,
+                    "annotated_text": annotated_text,
                     "stmt_label": label,
                     "stmt_label_id": stmt2id[label],
                     "ner_pred_annotated_text": ner_pred_annotated_text
@@ -72,7 +72,7 @@ def map_char_span_to_token_span(char_span, offset_mapping):
 # ---- Tokenize training examples ----
 def preprocess_examples_for_model(examples, tokenizer):
     encoding = tokenizer(
-        examples["text"],
+        examples["annotated_text"],
         truncation=True,
         max_length=512,
         padding=False,
@@ -84,7 +84,7 @@ def preprocess_examples_for_model(examples, tokenizer):
     encoding["stmt_label"] = examples["stmt_label"]  # Optional
 
     # Extract character-level entity spans for each example
-    entity_char_spans_batch = [extract_entity_spans(text) for text in examples["text"]]
+    entity_char_spans_batch = [extract_entity_spans(text) for text in examples["annotated_text"]]
     entity_char_spans_batch = [
         [[span["start"], span["end"]] for span in spans]
         for spans in entity_char_spans_batch
@@ -122,7 +122,7 @@ def spans_overlap(span1, span2):
 def preprocess_negative_examples_for_model(batch, stmt2id, tokenizer):
     negative_examples = []
 
-    texts = batch["text"]
+    texts = batch["annotated_text"]
     ner_texts = batch["ner_pred_annotated_text"]
 
     for gold_text, ner_pred_text in zip(texts, ner_texts):

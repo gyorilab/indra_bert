@@ -27,17 +27,15 @@ class WeightedTrainer(Trainer):
 
 
 def compute_class_weights(dataset, label_key="stmt_label_id"):
-    """
-    Compute class weights for use in weighted loss.
-    """
-    labels = dataset[label_key]
+    labels = [item[label_key] for item in dataset]
     label_counts = Counter(labels)
+    num_classes = max(label_counts.keys()) + 1
     total = sum(label_counts.values())
 
     class_weights = []
-    for i in range(len(label_counts)):
-        freq = label_counts.get(i, 1)
-        weight = total / (len(label_counts) * freq)
+    for i in range(num_classes):
+        freq = label_counts.get(i, 1)  # Use 1 for unseen classes to avoid zero division
+        weight = total / (num_classes * freq)
         class_weights.append(weight)
 
     return class_weights
