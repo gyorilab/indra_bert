@@ -4,13 +4,17 @@ from tqdm import tqdm
 from collections import OrderedDict
 from transformers import AutoTokenizer
 import re
+from typing import List, Dict
+
 from indra_bert.ner_agent_detector.model import AgentNERModel
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-# ---- Normalize annotation tags ----
+# ---- Helpers ----
+ENTITY_TAG_PATTERN = re.compile(r"<e>(.*?)</e>")
+
 def normalize_entity_tags(text: str) -> str:
     """
     Replace all opening <...> tags with <e> and all closing </...> tags with </e>
@@ -20,6 +24,31 @@ def normalize_entity_tags(text: str) -> str:
     # Replace any closing tag like </subj>, </obj>, </xyz> with </e>
     text = re.sub(r"</[^>]+>", "</e>", text)
     return text
+
+def extract_entity_spans(text: str) -> List[Dict[str, int]]:
+    """Extract start and end positions for all <e>...</e> entities."""
+    spans = []
+    for match in re.finditer(ENTITY_TAG_PATTERN, text):
+        spans.append({"text": match.group(1), "start": match.start(1), "end": match.end(1)})
+    return spans
+
+def spans_overlap(span1, span2):
+    return not (span1['end'] <= span2['start'] or span2['end'] <= span1['start'])
+
+def map_char_span_to_token_span(char_span, offset_mapping):
+    start_char, end_char = char_span
+    token_start = token_end = None
+    for idx, (token_start_char, token_end_char) in enumerate(offset_mapping):
+        if token_start is None and token_start_char <= start_char < token_end_char:
+            token_start = idx
+        if token_start is not None and token_start_char < end_char <= token_end_char:
+            token_end = idx + 1
+            break
+
+    if token_start is None or token_end is None:
+        return None  
+    
+    return [token_start, token_end]
 
 # ---- Load + preprocess raw training data ----
 def load_and_preprocess_raw_data(input_path):
@@ -54,70 +83,21 @@ def load_and_preprocess_raw_data(input_path):
 
     return examples, stmt2id
 
-def map_char_span_to_token_span(char_span, offset_mapping):
-    start_char, end_char = char_span
-    token_start = token_end = None
-    for idx, (token_start_char, token_end_char) in enumerate(offset_mapping):
-        if token_start is None and token_start_char <= start_char < token_end_char:
-            token_start = idx
-        if token_start is not None and token_start_char < end_char <= token_end_char:
-            token_end = idx + 1
-            break
-
-    if token_start is None or token_end is None:
-        return None  
-    
-    return [token_start, token_end]
-
 # ---- Tokenize training examples ----
 def preprocess_examples_for_model(examples, tokenizer):
+    examples_text =  examples["annotated_text"]
+    examples_entities_removed = [re.sub(ENTITY_TAG_PATTERN, "<e></e>", text) for text in examples_text]
     encoding = tokenizer(
-        examples["annotated_text"],
+        examples_entities_removed,
         truncation=True,
         max_length=512,
         padding=False,
         add_special_tokens=True,
-        return_token_type_ids=True,
-        return_offsets_mapping=True
+        return_token_type_ids=True
     )
     encoding["labels"] = examples["stmt_label_id"]
     encoding["stmt_label"] = examples["stmt_label"]  # Optional
-
-    # Extract character-level entity spans for each example
-    entity_char_spans_batch = [extract_entity_spans(text) for text in examples["annotated_text"]]
-    entity_char_spans_batch = [
-        [[span["start"], span["end"]] for span in spans]
-        for spans in entity_char_spans_batch
-    ]
-    encoding["entity_char_spans"] = entity_char_spans_batch
-
-    # Now convert char spans to token spans using offset_mapping per example
-    token_spans_batch = []
-    for i, spans in enumerate(entity_char_spans_batch):
-        token_spans = []
-        offset_mapping = encoding["offset_mapping"][i]
-        for span in spans:
-            mapped = map_char_span_to_token_span(span, offset_mapping)
-            if mapped is not None:
-                token_spans.append(mapped)
-        token_spans_batch.append(token_spans)
-
-    encoding["entity_token_spans"] = token_spans_batch
-
     return encoding
-
-import re
-from typing import List, Dict
-
-def extract_entity_spans(text: str) -> List[Dict[str, int]]:
-    """Extract start and end positions for all <e>...</e> entities."""
-    spans = []
-    for match in re.finditer(r"<e>(.*?)</e>", text):
-        spans.append({"text": match.group(1), "start": match.start(1), "end": match.end(1)})
-    return spans
-
-def spans_overlap(span1, span2):
-    return not (span1['end'] <= span2['start'] or span2['end'] <= span1['start'])
 
 def preprocess_negative_examples_for_model(batch, stmt2id, tokenizer):
     negative_examples = []
@@ -132,6 +112,7 @@ def preprocess_negative_examples_for_model(batch, stmt2id, tokenizer):
 
         gold_span_texts = {span["text"] for span in gold_spans}
 
+        per_sample_limit = 5
         for i in range(len(ner_spans)):
             for j in range(i + 1, len(ner_spans)):
                 span1, span2 = ner_spans[i], ner_spans[j]
@@ -151,8 +132,8 @@ def preprocess_negative_examples_for_model(batch, stmt2id, tokenizer):
                     for ent1, ent2 in [(text1, text2), (text2, text1)]:
                         try:
                             temp_text = raw_text
-                            temp_text = re.sub(rf"\b{re.escape(ent1)}\b", f"<e>{ent1}</e>", temp_text, count=1)
-                            temp_text = re.sub(rf"\b{re.escape(ent2)}\b", f"<e>{ent2}</e>", temp_text, count=1)
+                            temp_text = re.sub(rf"\b{re.escape(ent1)}\b", f"<e></e>", temp_text, count=1)
+                            temp_text = re.sub(rf"\b{re.escape(ent2)}\b", f"<e></e>", temp_text, count=1)
 
                             if temp_text.count("<e>") != 2:
                                 continue
@@ -167,28 +148,17 @@ def preprocess_negative_examples_for_model(batch, stmt2id, tokenizer):
                                 return_offsets_mapping=True
                             )
 
-                            new_spans = extract_entity_spans(temp_text)
-                            if len(new_spans) != 2:
-                                continue
-
-                            entity_char_spans = [[s["start"], s["end"]] for s in new_spans]
-                            token_spans = [map_char_span_to_token_span(span, enc["offset_mapping"]) for span in entity_char_spans]
-
-                            if None in token_spans:
-                                logger.error(f"Invalid token spans for text: {temp_text}",
-                                             f" entity_char_spans: {entity_char_spans}, offset_mapping: {enc['offset_mapping']}")
-                                continue
-
                             negative_examples.append({
                                 "input_ids": enc["input_ids"],
                                 "attention_mask": enc["attention_mask"],
                                 "token_type_ids": enc.get("token_type_ids", [0] * len(enc["input_ids"])),
                                 "labels": stmt2id["No_Relation"],
                                 "stmt_label": "No_Relation",
-                                "entity_char_spans": entity_char_spans,
-                                "entity_token_spans": token_spans
+                                "stmt_label_id": stmt2id["No_Relation"],
                             })
-                            break  # accept only the first valid form
+                            per_sample_limit -= 1
+                            if per_sample_limit == 0:
+                                break  # accept only a limited number of negatives per sample
                         except Exception as e:
                             logger.error(f"Error processing hard negative: {e}")
                             continue
@@ -200,55 +170,24 @@ def preprocess_negative_examples_for_model(batch, stmt2id, tokenizer):
 
 # ---- Tokenize for inference ----
 def preprocess_for_inference(text, tokenizer):
-    # No preprocess needed currently, but keeping for consistency
+    text_entities_removed = re.sub(ENTITY_TAG_PATTERN, "<e></e>", text)
     enc = tokenizer(
-        text,
+        text_entities_removed,
         return_tensors="pt",
         truncation=True,
         max_length=512,
         padding="longest",
-        add_special_tokens=True,
-        return_offsets_mapping=True
+        add_special_tokens=True
     )
-    entity_char_spans = extract_entity_spans(text)
-    entity_char_spans = [
-        [span["start"], span["end"]] for span in entity_char_spans
-    ]
-    enc["entity_char_spans"] = entity_char_spans
-    token_spans = [
-        [map_char_span_to_token_span(span, enc["offset_mapping"][0]) for span in entity_char_spans]
-    ]
-    enc["entity_token_spans"] = token_spans
     return enc
 
 def preprocess_for_inference_batch(texts: list[str], tokenizer, max_length=512):
-    """
-    Tokenize a batch of input texts for classification.
-    """
+    texts_entities_removed = [re.sub(ENTITY_TAG_PATTERN, "<e></e>", text) for text in texts]
     enc = tokenizer(
-        texts,
+        texts_entities_removed,
         padding="longest",
         truncation=True,
         max_length=max_length,
-        return_tensors="pt",
-        return_offsets_mapping=True
+        return_tensors="pt",    
     )
-    entity_char_spans_batch = [extract_entity_spans(text) for text in texts]
-    entity_char_spans_batch = [
-        [[span["start"], span["end"]] for span in spans]
-        for spans in entity_char_spans_batch
-    ]
-    enc["entity_char_spans"] = entity_char_spans_batch
-
-    token_spans_batch = []
-    for i, spans in enumerate(entity_char_spans_batch):
-        token_spans = []
-        offset_mapping = enc["offset_mapping"][i]
-        for span in spans:
-            mapped = map_char_span_to_token_span(span, offset_mapping)
-            if mapped is not None:
-                token_spans.append(mapped)
-        token_spans_batch.append(token_spans)
-
-    enc["entity_token_spans"] = token_spans_batch
     return enc

@@ -1,13 +1,14 @@
 import argparse
 from pathlib import Path
-from datetime import datetime
-
 import numpy as np
-from datasets import Dataset, concatenate_datasets
-from transformers import AutoTokenizer, TrainingArguments
+from datetime import datetime
+from collections import Counter
+
+from datasets import Dataset, concatenate_datasets, DatasetDict, load_from_disk
+from transformers import AutoTokenizer, TrainingArguments, DataCollatorWithPadding
 from sklearn.metrics import precision_recall_fscore_support
 
-from .bert_classification_head import BertForIndraStmtClassification
+from .bert_classification_head import EntitySemanticsUnawareHead
 from .preprocess import (
     load_and_preprocess_raw_data,
     preprocess_examples_for_model,
@@ -15,23 +16,18 @@ from .preprocess import (
 )
 from .weighted_trainer import WeightedTrainer, compute_class_weights
 
-from transformers import DataCollatorWithPadding
 
-class DataCollatorWithEntitySpans:
+class DataCollator:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.default_collator = DataCollatorWithPadding(tokenizer)
+        self.print_counter = 0
 
     def __call__(self, features):
-        # Separate entity token spans from the rest
-        entity_token_spans = [f.pop("entity_token_spans") for f in features]
-
-        # Let the default collator handle everything else
         batch = self.default_collator(features)
-
-        # Now manually add back variable-length entity_token_spans (still list[list[list[int]]])
-        batch["entity_token_spans"] = entity_token_spans
-
+        if self.print_counter < 3:
+            print("Example batch item:", self.tokenizer.decode(batch['input_ids'][0]))
+            self.print_counter += 1
         return batch
 
 
@@ -54,127 +50,132 @@ def compute_metrics(p):
     }
 
 
-def main(args):
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset_path", required=True)
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--model_name", default="bert-base-uncased")
+    parser.add_argument("--use_cache", action="store_true")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
     dataset_path = Path(args.dataset_path)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    cache_dataset_path = output_dir / "cached_dataset"
+    cache_stmt_path = output_dir / "stmt2id.npy"
+
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer.add_special_tokens({'additional_special_tokens': ['<e>', '</e>']})
 
-    # Add entity tags as special tokens
-    special_tokens_dict = {'additional_special_tokens': ['<e>', '</e>']}
-    tokenizer.add_special_tokens(special_tokens_dict)
+    if args.use_cache and cache_dataset_path.exists() and cache_stmt_path.exists():
+        print("Loading from cache...")
+        cached = load_from_disk(cache_dataset_path)
+        train_dataset = cached["train"]
+        val_dataset = cached["validation"]
+        test_dataset = cached["test"]
+        with open(cache_stmt_path, "rb") as f:
+            stmt2id = np.load(f, allow_pickle=True).item()
+        id2stmt = {v: k for k, v in stmt2id.items()}
+    else:
+        print("No cache found, processing dataset...")
+        examples, stmt2id = load_and_preprocess_raw_data(dataset_path)
+        id2stmt = {v: k for k, v in stmt2id.items()}
+        dataset = Dataset.from_list(examples)
 
-    # ---- Load and preprocess raw data ----
-    examples, stmt2id = load_and_preprocess_raw_data(dataset_path)
-    id2stmt = {v: k for k, v in stmt2id.items()}
+        split_dataset = dataset.train_test_split(test_size=0.3, seed=42)
+        train_dataset = split_dataset["train"]
+        temp_dataset = split_dataset["test"]
+        val_test_split = temp_dataset.train_test_split(test_size=1 / 3, seed=42)
+        val_dataset = val_test_split["train"]
+        test_dataset = val_test_split["test"]
 
-    dataset = Dataset.from_list(examples)
+        # Tokenize positives
+        train_pos = train_dataset.map(lambda x: preprocess_examples_for_model(x, tokenizer), batched=True)
+        val_pos = val_dataset.map(lambda x: preprocess_examples_for_model(x, tokenizer), batched=True)
+        test_pos = test_dataset.map(lambda x: preprocess_examples_for_model(x, tokenizer), batched=True)
 
-    # ---- Split dataset ----
-    split_dataset = dataset.train_test_split(test_size=0.3, seed=42, shuffle=True)
-    train_dataset = split_dataset["train"]
-    temp_dataset = split_dataset["test"]
-    val_test_split = temp_dataset.train_test_split(test_size=1/3, seed=42, shuffle=True)
-    val_dataset = val_test_split["train"]
-    test_dataset = val_test_split["test"]
+        # Generate and tokenize negatives
+        train_neg = train_dataset.map(
+            preprocess_negative_examples_for_model,
+            batched=True,
+            remove_columns=train_dataset.column_names,
+            fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
+        )
+        val_neg = val_dataset.map(
+            preprocess_negative_examples_for_model,
+            batched=True,
+            remove_columns=val_dataset.column_names,
+            fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
+        )
+        test_neg = test_dataset.map(
+            preprocess_negative_examples_for_model,
+            batched=True,
+            remove_columns=test_dataset.column_names,
+            fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
+        )
 
-    # ---- Tokenize datasets ----
-    train_dataset_positive = train_dataset.map(
-        lambda x: preprocess_examples_for_model(x, tokenizer), batched=True
-    )
-    val_dataset_positive = val_dataset.map(
-        lambda x: preprocess_examples_for_model(x, tokenizer), batched=True
-    )
-    test_dataset_positive = test_dataset.map(
-        lambda x: preprocess_examples_for_model(x, tokenizer), batched=True
-    )
-    # ---- Preprocess negative examples ----
-    train_dataset_negative = train_dataset.map(
-        preprocess_negative_examples_for_model,
-        batched=True,
-        remove_columns=train_dataset.column_names,
-        fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
-    )
-    val_dataset_negative = val_dataset.map(
-        preprocess_negative_examples_for_model,
-        batched=True,
-        remove_columns=val_dataset.column_names,
-        fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
-    )
-    test_dataset_negative = test_dataset.map(
-        preprocess_negative_examples_for_model,
-        batched=True,
-        remove_columns=test_dataset.column_names,
-        fn_kwargs={"stmt2id": stmt2id, "tokenizer": tokenizer}
-    )
-    # ---- Sample negative examples ----
-    k = 2  # Number of negative examples per positive example
+        # Sample negatives (k = 1)
+        k = 4
+        train_neg = train_neg.shuffle(seed=42).select(range(min(len(train_neg), k * len(train_pos))))
+        val_neg = val_neg.shuffle(seed=42).select(range(min(len(val_neg), k * len(val_pos))))
+        test_neg = test_neg.shuffle(seed=42).select(range(min(len(test_neg), k * len(test_pos))))
 
-    num_positives_train = len(train_dataset_positive)
-    num_positives_val = len(val_dataset_positive)
-    num_positives_test = len(test_dataset_positive)
+        # Combine
+        train_dataset = concatenate_datasets([train_pos, train_neg])
+        val_dataset = concatenate_datasets([val_pos, val_neg])
+        test_dataset = concatenate_datasets([test_pos, test_neg])
 
-    train_dataset_negative_sampled = (train_dataset_negative.shuffle(seed=42).
-                                      select(range(min(len(train_dataset_negative), int(k * num_positives_train)))))
-    val_dataset_negative_sampled = (val_dataset_negative.shuffle(seed=42).
-                                      select(range(min(len(val_dataset_negative), int(k * num_positives_val)))))
-    test_dataset_negative_sampled = (test_dataset_negative.shuffle(seed=42).
-                                      select(range(min(len(test_dataset_negative), int(k * num_positives_test)))))
-
-    # Shuffle and concatenate positive and negative examples
-    train_dataset = concatenate_datasets([train_dataset_positive, train_dataset_negative_sampled])
-    val_dataset = concatenate_datasets([val_dataset_positive, val_dataset_negative_sampled])
-    test_dataset = concatenate_datasets([test_dataset_positive, test_dataset_negative_sampled])
-
-    # Shuffle the datasets
-    train_dataset = train_dataset.shuffle(seed=42)
-    val_dataset = val_dataset.shuffle(seed=42)
-    test_dataset = test_dataset.shuffle(seed=42)
+        # Save to cache
+        cached = DatasetDict(train=train_dataset, validation=val_dataset, test=test_dataset)
+        cached.save_to_disk(cache_dataset_path)
+        with open(cache_stmt_path, "wb") as f:
+            np.save(f, stmt2id)
 
     # ---- Log dataset sizes ----
-    from collections import Counter
     label_counts = Counter(train_dataset["labels"])
     print("Label distribution in training data:", label_counts) 
 
-    # ---- Model ----
-    model = BertForIndraStmtClassification.from_pretrained_with_labels(
+    # ---- Model Setup ----
+    model = EntitySemanticsUnawareHead.from_pretrained_with_labels(
         pretrained_model_name=args.model_name,
         label2id=stmt2id,
         id2label=id2stmt,
     )
-    # Resize token embeddings to accommodate <e> and </e>
     model.resize_token_embeddings(len(tokenizer))
-    
-    # ---- Training ----
+
+    # ---- Training Setup ----
     training_args = TrainingArguments(
-        output_dir=output_dir,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        logging_strategy="epoch",
-        learning_rate=2e-5,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=16,
-        num_train_epochs=8,
-        weight_decay=0.01,
-        save_total_limit=1,
-        logging_dir="./logs",
+            output_dir=output_dir,
+            eval_strategy="epoch",
+            save_strategy="epoch",
+            logging_strategy="epoch",
+            learning_rate=2e-5,
+            per_device_train_batch_size=8,
+            per_device_eval_batch_size=16,
+            gradient_accumulation_steps=2,
+            num_train_epochs=8,
+            weight_decay=0.01,
+            save_total_limit=1,
+            logging_dir="./logs",
     )
 
     class_weights = compute_class_weights(train_dataset)
-    data_collator = DataCollatorWithEntitySpans(tokenizer)
-
     trainer = WeightedTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         tokenizer=tokenizer,
-        data_collator=data_collator,
+        data_collator=DataCollator(tokenizer),
         compute_metrics=compute_metrics,
         class_weights=class_weights,
     )
 
+    # ---- Train and Evaluate ----
     trainer.train()
 
     # ---- Final evaluation ----
@@ -184,6 +185,9 @@ def main(args):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = output_dir / f"test_eval_results_{timestamp}.txt"
     with open(log_file, "w") as f:
+        f.write(f"Name: {args.model_name}\n")
+        f.write(f"Label distribution in training data: {label_counts}\n")
+        f.write("\n")
         for key, value in test_metrics.items():
             f.write(f"{key}: {value}\n")
 
@@ -191,9 +195,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train INDRA Statement Classifier")
-    parser.add_argument("--dataset_path", type=str, required=True, help="Path to dataset JSONL file")
-    parser.add_argument("--model_name", type=str, required=True, help="Pretrained model name")
-    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save model and logs")
-    args = parser.parse_args()
-    main(args)
+    main()

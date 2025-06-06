@@ -2,14 +2,14 @@ from transformers import AutoTokenizer
 import torch
 from pathlib import Path
 from .preprocess import preprocess_for_inference, preprocess_for_inference_batch
-from .bert_classification_head import BertForIndraStmtClassification
+from .bert_classification_head import EntitySemanticsUnawareHead
 
 
 class IndraStmtClassifier:
     def __init__(self, model_path, device=None):
         model_path = Path(model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.model = BertForIndraStmtClassification.from_pretrained(model_path)
+        self.model = EntitySemanticsUnawareHead.from_pretrained(model_path)
         self.model.eval()
 
         # Device (auto detect)
@@ -26,13 +26,10 @@ class IndraStmtClassifier:
         input_ids = enc["input_ids"].to(self.device)
         attention_mask = enc["attention_mask"].to(self.device)
 
-        entity_token_spans = enc["entity_token_spans"]
-
         with torch.no_grad():
             outputs = self.model(
                 input_ids=input_ids,
-                attention_mask=attention_mask,
-                entity_token_spans=entity_token_spans
+                attention_mask=attention_mask
             )
             logits = outputs.logits
             probs = torch.softmax(logits, dim=-1)
@@ -47,9 +44,7 @@ class IndraStmtClassifier:
             "probabilities": prob_dist,
             "input_ids": enc["input_ids"],
             "decoded_text": self.tokenizer.decode(enc["input_ids"].squeeze()),
-            "original_text": text,
-            "entity_spans": enc.get("entity_spans", None),
-            "offset_mapping": enc.get("offset_mapping", None)
+            "original_text": text
         }
 
     def predict_batch(self, texts: list[str]):
@@ -59,19 +54,17 @@ class IndraStmtClassifier:
         # Step 1: Batch tokenization
         enc = preprocess_for_inference_batch(
             texts=texts,
-            tokenizer=self.tokenizer,
+            tokenizer=self.tokenizer
         )
 
         input_ids = enc["input_ids"].to(self.device)
         attention_mask = enc["attention_mask"].to(self.device)
 
-        entity_token_spans = enc["entity_token_spans"]
         # Step 2: Model inference
         with torch.no_grad():
             outputs = self.model(
                 input_ids=input_ids,
-                attention_mask=attention_mask,
-                entity_token_spans=entity_token_spans
+                attention_mask=attention_mask
             )
             logits = outputs.logits  # shape: (batch_size, num_classes)
             probs = torch.softmax(logits, dim=-1)
@@ -92,9 +85,7 @@ class IndraStmtClassifier:
                 "probabilities": prob_dist,
                 "input_ids": input_ids[i],
                 "decoded_text": self.tokenizer.decode(input_ids[i]),
-                "original_text": texts[i],
-                "entity_spans": enc.get("entity_spans", None)[i] if "entity_spans" in enc else None,
-                "offset_mapping": enc.get("offset_mapping", None)[i] if "offset_mapping" in enc else None
+                "original_text": texts[i]            
             })
 
         return results
