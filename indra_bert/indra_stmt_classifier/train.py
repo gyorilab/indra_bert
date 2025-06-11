@@ -54,8 +54,10 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_path", required=True)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--model_name", default="bert-base-uncased")
-    parser.add_argument("--use_cache", action="store_true")
+    parser.add_argument("--model_name", default="microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract")
+    parser.add_argument("--epochs", type=int, default=8)
+    parser.add_argument("--version", default="1.0")
+    parser.add_argument("--use_cached_dataset", action="store_true")
     return parser.parse_args()
 
 
@@ -66,12 +68,12 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cache_dataset_path = output_dir / "cached_dataset"
-    cache_stmt_path = output_dir / "stmt2id.npy"
+    cache_stmt_path = cache_dataset_path / "stmt2id.npy"
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.add_special_tokens({'additional_special_tokens': ['<e>', '</e>']})
 
-    if args.use_cache and cache_dataset_path.exists() and cache_stmt_path.exists():
+    if args.use_cached_dataset and cache_dataset_path.exists() and cache_stmt_path.exists():
         print("Loading from cache...")
         cached = load_from_disk(cache_dataset_path)
         train_dataset = cached["train"]
@@ -140,12 +142,19 @@ def main():
     print("Label distribution in training data:", label_counts) 
 
     # ---- Model Setup ----
+    training_config = vars(args).copy()  # Convert Namespace -> dict
+    training_config["time_created"] = datetime.now().strftime("%Y-%m-%d")
     model = EntitySemanticsUnawareHead.from_pretrained_with_labels(
         pretrained_model_name=args.model_name,
         label2id=stmt2id,
         id2label=id2stmt,
+        training_config=training_config
     )
-    model.resize_token_embeddings(len(tokenizer))
+    if model.get_input_embeddings().num_embeddings != len(tokenizer):
+        print("Resizing token embeddings to match tokenizer size...")
+        print("Old embedding size:", model.get_input_embeddings().num_embeddings)
+        print("New embedding size:", len(tokenizer))
+        model.resize_token_embeddings(len(tokenizer))
 
     # ---- Training Setup ----
     training_args = TrainingArguments(
@@ -157,7 +166,7 @@ def main():
             per_device_train_batch_size=8,
             per_device_eval_batch_size=16,
             gradient_accumulation_steps=2,
-            num_train_epochs=8,
+            num_train_epochs=args.epochs,
             weight_decay=0.01,
             save_total_limit=1,
             logging_dir="./logs",

@@ -3,8 +3,9 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-from datasets import Dataset
-from transformers import AutoTokenizer, AutoModelForTokenClassification, Trainer, TrainingArguments
+from datasets import Dataset, load_from_disk, DatasetDict
+from transformers import (AutoTokenizer, AutoModelForTokenClassification, 
+                          AutoConfig, Trainer, TrainingArguments)
 from sklearn.metrics import precision_recall_fscore_support
 
 
@@ -73,53 +74,99 @@ def compute_metrics(p):
     )
     return {"precision": precision, "recall": recall, "f1": f1}
 
-def main(args):
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train NER model")
+    parser.add_argument("--dataset", type=str, required=True, help="Path to dataset JSONL file")
+    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save trained model")
+    parser.add_argument("--model_name", type=str, required=True, help="Pretrained model name or path")
+    parser.add_argument("--epochs", type=int, default=8)
+    parser.add_argument("--version", default="1.0")
+    parser.add_argument("--use_cached_dataset", action="store_true")
+    args = parser.parse_args()
+    return args
+
+def main():
+    args = parse_args()
     dataset_path = Path(args.dataset)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    cache_dataset_path = output_dir / "cached_dataset"
+    cache_label2id_path = cache_dataset_path / "label2id.npy"
+
     # ---- Load tokenizer ----
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract") 
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name) 
     special_tokenizer = SpecialTokenOffsetFixTokenizer(tokenizer)
-    # ---- Load raw data ----
-    raw_examples = load_and_preprocess_from_raw_data(dataset_path)
 
-    # ---- Build label mappings from dataset ----
-    label2id, id2label = build_label_mappings(raw_examples)
+    if args.use_cached_dataset and cache_dataset_path.exists() and cache_label2id_path.exists():
+        print("Loading from cache...")
+        cached = load_from_disk(cache_dataset_path)
+        train_dataset = cached["train"]
+        val_dataset = cached["validation"]
+        test_dataset = cached["test"]
+        with open(cache_label2id_path, "rb") as f:
+            label2id = np.load(f, allow_pickle=True).item()
+        id2label = {v: k for k, v in label2id.items()}
+    else:
+        print("No cache found, processing dataset...")
+        # ---- Load raw data ----
+        raw_examples = load_and_preprocess_from_raw_data(dataset_path)
 
-    # ---- Convert to HuggingFace Dataset ----
-    dataset = Dataset.from_list(raw_examples)
+        # ---- Build label mappings from dataset ----
+        label2id, _ = build_label_mappings(raw_examples)
+        id2label = {v: k for k, v in label2id.items()}
 
-    # ---- Split dataset ----
-    split_dataset = dataset.train_test_split(test_size=0.3, seed=42)
-    train_dataset = split_dataset["train"]
-    temp_dataset = split_dataset["test"]
-    val_test_split = temp_dataset.train_test_split(test_size=1/3, seed=42)
-    val_dataset = val_test_split["train"]
-    test_dataset = val_test_split["test"]
+        # ---- Convert to HuggingFace Dataset ----
+        dataset = Dataset.from_list(raw_examples)
 
-    # ---- Preprocess for model ----
-    train_dataset = train_dataset.map(
-        lambda x: preprocess_examples_from_dataset(x, special_tokenizer, label2id),
-        batched=False
-    )
-    val_dataset = val_dataset.map(
-        lambda x: preprocess_examples_from_dataset(x, special_tokenizer, label2id),
-        batched=False
-    )
-    test_dataset = test_dataset.map(
-        lambda x: preprocess_examples_from_dataset(x, special_tokenizer, label2id),
-        batched=False
-    )
+        # ---- Split dataset ----
+        split_dataset = dataset.train_test_split(test_size=0.3, seed=42)
+        train_dataset = split_dataset["train"]
+        temp_dataset = split_dataset["test"]
+        val_test_split = temp_dataset.train_test_split(test_size=1/3, seed=42)
+        val_dataset = val_test_split["train"]
+        test_dataset = val_test_split["test"]
+
+        # ---- Preprocess for model ----
+        train_dataset = train_dataset.map(
+            lambda x: preprocess_examples_from_dataset(x, special_tokenizer, label2id),
+            batched=False
+        )
+        val_dataset = val_dataset.map(
+            lambda x: preprocess_examples_from_dataset(x, special_tokenizer, label2id),
+            batched=False
+        )
+        test_dataset = test_dataset.map(
+            lambda x: preprocess_examples_from_dataset(x, special_tokenizer, label2id),
+            batched=False
+        )
+        # ---- Save cache ----
+        # Save to cache
+        cached = DatasetDict(train=train_dataset, validation=val_dataset, test=test_dataset)
+        cached.save_to_disk(cache_dataset_path)
+        with open(cache_label2id_path, "wb") as f:
+            np.save(f, label2id)
 
     # ---- Load model ----
+    training_config = vars(args).copy()
+    training_config['time_created'] = datetime.now().strftime("%Y-%m-%d")
+    config = AutoConfig.from_pretrained(
+            args.model_name,
+            num_labels=len(label2id),
+            label2id=label2id,
+            id2label=id2label
+    )
+    config.training_config = training_config
+
     model = AutoModelForTokenClassification.from_pretrained(
         args.model_name,
-        num_labels=len(label2id),
-        id2label=id2label,
-        label2id=label2id
+        config=config
     )
-    model.resize_token_embeddings(len(special_tokenizer.tokenizer))
+    if model.get_input_embeddings().num_embeddings != len(special_tokenizer.tokenizer):
+        print("Resizing token embeddings to match tokenizer size...")
+        print("Old embedding size:", model.get_input_embeddings().num_embeddings)
+        print("New embedding size:",len(special_tokenizer.tokenizer))
+        model.resize_token_embeddings(len(special_tokenizer.tokenizer))
 
     # ---- Training arguments ----
     training_args = TrainingArguments(
@@ -130,7 +177,7 @@ def main(args):
         learning_rate=2e-5,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        num_train_epochs=10,
+        num_train_epochs=args.epochs,
         weight_decay=0.01,
         save_total_limit=1,
         logging_dir='./logs',
@@ -170,10 +217,4 @@ def main(args):
     print(f"Test evaluation results saved to {log_file}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train NER model")
-    parser.add_argument("--dataset", type=str, required=True, help="Path to dataset JSONL file")
-    parser.add_argument("--model_name", type=str, required=True, help="Pretrained model name or path")
-    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save trained model")
-    args = parser.parse_args()
-
-    main(args)
+    main()

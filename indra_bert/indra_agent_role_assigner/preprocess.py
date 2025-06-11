@@ -101,7 +101,7 @@ class SpecialTokenOffsetFixTokenizer:
         if is_batched:
             offsets = [list(map(tuple, o.tolist())) for o in offsets]
         else:
-            offsets = list(map(tuple, offsets.tolist()))
+            offsets = list(map(tuple, offsets))
 
         # Get tokens for checking special tokens
         batch_tokens = (

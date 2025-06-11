@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoConfig, PreTrainedModel, BertConfig
 from transformers.modeling_outputs import SequenceClassifierOutput
+from time import time
     
 class EntitySemanticsUnawareHead(PreTrainedModel):
     config_class = AutoConfig  # Or dynamic if supporting multiple models
@@ -27,10 +28,13 @@ class EntitySemanticsUnawareHead(PreTrainedModel):
             pretrained_model_name,
             num_labels=len(label2id),
             label2id=label2id,
-            id2label=id2label,
-            **kwargs
+            id2label=id2label
         )
-        config.pretrained_model_name_or_path = pretrained_model_name
+        
+        # Manually assign any extra fields
+        for key, value in kwargs.items():
+            setattr(config, key, value)
+
         model = cls(config)
         model.bert = AutoModel.from_pretrained(pretrained_model_name, config=config)
         return model
