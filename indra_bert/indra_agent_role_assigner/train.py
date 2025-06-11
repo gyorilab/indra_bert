@@ -76,7 +76,7 @@ def compute_metrics(p):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train NER model")
-    parser.add_argument("--dataset", type=str, required=True, help="Path to dataset JSONL file")
+    parser.add_argument("--dataset_path", type=str, required=True, help="Path to dataset JSONL file")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save trained model")
     parser.add_argument("--model_name", type=str, required=True, help="Pretrained model name or path")
     parser.add_argument("--epochs", type=int, default=8)
