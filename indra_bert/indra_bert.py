@@ -1,7 +1,11 @@
 __all__ = ['IndraStructuredExtractor']
 
+import os
+from pathlib import Path
 from typing import List
 from itertools import combinations
+
+from huggingface_hub import hf_hub_download
 
 from .ner_agent_detector.model import AgentNERModel
 from .indra_stmt_classifier.model import IndraStmtClassifier
@@ -22,6 +26,20 @@ class IndraStructuredExtractor:
         self.stmt_model = IndraStmtClassifier(stmt_model_path)
         self.role_model = IndraAgentsTagger(role_model_path)
         self.stmt_conf_threshold = stmt_conf_threshold
+
+        self.ner_model_local_path = self._resolve_model_path(ner_model_path, "ner")
+        self.stmt_model_local_path = self._resolve_model_path(stmt_model_path, "stmt")
+        self.role_model_local_path = self._resolve_model_path(role_model_path, "role")
+
+    def _resolve_model_path(self, model_path, label="model"):
+        try:
+            path = hf_hub_download(repo_id=model_path, filename="config.json")
+            return os.path.dirname(path)
+        except Exception as e:
+            logger.info(f"Not a huggingface hub repo id ({label}): {model_path}. "
+                        f"Assuming local path...")
+            local_path = Path(model_path)
+            return local_path if local_path.is_absolute() else Path.cwd() / local_path
 
     def get_entity_pairs(self, entity_preds):
         return list(combinations(entity_preds['entity_spans'], 2))
