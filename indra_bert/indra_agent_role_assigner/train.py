@@ -87,7 +87,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    dataset_path = Path(args.dataset)
+    dataset_path = Path(args.dataset_path)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

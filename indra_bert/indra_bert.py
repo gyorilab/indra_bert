@@ -9,8 +9,8 @@ from huggingface_hub import hf_hub_download
 
 from .ner_agent_detector.model import AgentNERModel
 from .indra_stmt_classifier.model import IndraStmtClassifier
-
 from .indra_agent_role_assigner.model import IndraAgentsTagger
+from .agent_mutation_detector.model import AgentMutationDetector
 from .utils.annotate import annotate_entities
 import logging
 logger = logging.getLogger(__name__)
@@ -20,16 +20,19 @@ class IndraStructuredExtractor:
     def __init__(self, 
                  ner_model_path="thomaslim6793/indra_bert_ner_agent_detection",
                  stmt_model_path="thomaslim6793/indra_bert_indra_stmt_classifier", 
-                 role_model_path="thomaslim6793/indra_bert_indra_stmt_agents_role_assigner", 
+                 role_model_path="thomaslim6793/indra_bert_indra_stmt_agents_role_assigner",
+                 mutations_model_path="thomaslim6793/indra_bert_agent_mutation_detector",
                  stmt_conf_threshold=0.95):
         self.ner_model = AgentNERModel(ner_model_path)
         self.stmt_model = IndraStmtClassifier(stmt_model_path)
         self.role_model = IndraAgentsTagger(role_model_path)
+        self.mutations_model = AgentMutationDetector(mutations_model_path)
         self.stmt_conf_threshold = stmt_conf_threshold
 
         self.ner_model_local_path = self._resolve_model_path(ner_model_path, "ner")
         self.stmt_model_local_path = self._resolve_model_path(stmt_model_path, "stmt")
         self.role_model_local_path = self._resolve_model_path(role_model_path, "role")
+        self.mutations_model_local_path = self._resolve_model_path(mutations_model_path, "mutations")
 
     def _resolve_model_path(self, model_path, label="model"):
         try:
@@ -62,6 +65,9 @@ class IndraStructuredExtractor:
                     continue
 
                 role_pred = self.role_model.predict(stmt_pred['predicted_label'], annotated_text)
+                
+                # Detect mutations for each agent in the pair
+                mutations_pred = self.mutations_model.predict(pair, annotated_text)
 
                 stmt = {
                     'original_text': sentence,
@@ -79,6 +85,10 @@ class IndraStructuredExtractor:
                     'role_pred': {
                         'roles': role_pred.get('role_spans', []),
                         'raw_output': role_pred
+                    },
+                    'mutations_pred': {
+                        'mutations': mutations_pred.get('mutations', {}),
+                        'raw_output': mutations_pred
                     }
                 }
 
@@ -125,11 +135,21 @@ class IndraStructuredExtractor:
         # STEP 3: Run role assignment in batch
         role_preds_batch = self.role_model.predict_batch(role_inputs_type, role_inputs_text)
 
-        # STEP 4: Assemble final results
-        for stmt_pred, (text, pair, ner_preds), role_pred in zip(
+        # STEP 4: Run mutation detection in batch
+        mutations_inputs_pairs = []
+        mutations_inputs_text = []
+        for (text, pair, ner_preds) in [x[1] for x in final_pairs]:
+            mutations_inputs_pairs.append(pair)
+            mutations_inputs_text.append(annotate_entities(text, pair))
+        
+        mutations_preds_batch = self.mutations_model.predict_batch(mutations_inputs_pairs, mutations_inputs_text)
+
+        # STEP 5: Assemble final results
+        for stmt_pred, (text, pair, ner_preds), role_pred, mutations_pred in zip(
                 [x[0] for x in final_pairs],
                 [x[1] for x in final_pairs],
-                role_preds_batch):
+                role_preds_batch,
+                mutations_preds_batch):
             
             if stmt_pred['predicted_label'] == "No_Relation":
                 continue
@@ -150,6 +170,10 @@ class IndraStructuredExtractor:
                 'role_pred': {
                     'roles': role_pred.get('role_spans', []),
                     'raw_output': role_pred
+                },
+                'mutations_pred': {
+                    'mutations': mutations_pred.get('mutations', {}),
+                    'raw_output': mutations_pred
                 }
             }
 
@@ -159,7 +183,12 @@ class IndraStructuredExtractor:
     
     def get_json_indra_stmts(self, text, source_api="indra_bert"):
         """Extract statements and convert to INDRA-style JSON with agent coords."""
-        structured_statements = self.extract_structured_statements(text)
+        try:
+            structured_statements = self.extract_structured_statements_batch(text)
+        except Exception as e:
+            logger.warning(f"Batch extraction failed. Falling back to iterative extraction. Error: {e}")
+            structured_statements = self.extract_structured_statements(text)
+        
         indra_statements = []
 
         for stmt in structured_statements:
@@ -169,6 +198,7 @@ class IndraStructuredExtractor:
                 continue
 
             roles = stmt['role_pred']['roles']
+            mutations_pred = stmt['mutations_pred']['mutations']
 
             agent_roles = {}
             raw_texts = []
@@ -188,57 +218,9 @@ class IndraStructuredExtractor:
                         "TEXT": name
                     }
                 }
-
-            indra_stmt = {
-                "type": stmt_type,
-                **agent_roles,
-                "evidence": [{
-                    "source_api": source_api,
-                    "text": stmt['original_text'],
-                    "annotations": {
-                        "agents": {
-                            "raw_text": raw_texts,
-                            "coords": coords
-                        }
-                    }
-                }]
-            }
-
-            indra_statements.append(indra_stmt)
-
-        return indra_statements
-
-
-    def get_json_indra_stmts_batch(self, text_list: List[str], source_api="indra_bert"):
-        structured_statements = self.extract_structured_statements_batch(text_list)
-        indra_statements = []
-
-        for stmt in structured_statements:
-            stmt_type = stmt['stmt_pred']['label']
-
-            if stmt_type== "No_Relation":
-                continue
-
-            roles = stmt['role_pred']['roles']
-
-            agent_roles = {}
-            raw_texts = []
-            coords = []
-
-            for role_info in roles:
-                role = role_info['role']
-                name = role_info['text']
-                start = role_info['start']
-                end = role_info['end']
-                raw_texts.append(name)
-                coords.append([start, end])
-
-                agent_roles[role] = {
-                    "name": name,
-                    "db_refs": {
-                        "TEXT": name
-                    }
-                }
+                
+                if mutations_pred.get((start, end, name), None):
+                    agent_roles[role]["mutations"] = mutations_pred[(start, end, name)]
 
             indra_stmt = {
                 "type": stmt_type,

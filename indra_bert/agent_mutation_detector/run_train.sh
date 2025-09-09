@@ -6,9 +6,9 @@ conda activate indra_gpt
 
 cd ~/gyorilab/indra_bert
 
-python -m indra_bert.indra_agent_role_assigner.train \
-    --dataset_path data/indra_benchmark_annotated_data/indra_benchmark_corpus_annotated_stratified_sample_2000.jsonl \
-    --output_dir output/indra_stmt_agents_role_assigner \
+python -m indra_bert.agent_mutation_detector.train \
+    --dataset_path data/indra_benchmark_annotated_data/variants_annotated_data/indra_benchmark_corpus_variants_annotated.jsonl \
+    --output_dir output/agent_mutation_detection \
     --model_name microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract \
     --epochs 8 \
     --version 1.0 \
