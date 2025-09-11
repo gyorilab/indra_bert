@@ -30,7 +30,7 @@ class AgentMutationDetector:
             modified_text = self._create_single_agent_text(annotated_text, agent)
             
             # Run mutation detection on this agent
-            mutation_spans = self._detect_mutations_for_agent(modified_text, agent)
+            mutation_spans = self._detect_mutations_for_agent(modified_text)
             
             if mutation_spans:
                 # Convert mutation spans to mutation objects
@@ -88,13 +88,12 @@ class AgentMutationDetector:
         
         return modified_text
 
-    def _detect_mutations_for_agent(self, text: str, agent: Dict) -> List[Dict]:
+    def _detect_mutations_for_agent(self, text: str) -> List[Dict]:
         """
         Detect mutation spans in text for a specific agent.
         
         Args:
             text: Text with only the target agent tagged
-            agent: The agent entity
             
         Returns:
             List of mutation spans

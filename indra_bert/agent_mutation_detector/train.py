@@ -195,16 +195,23 @@ def main():
     # Create training arguments
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        logging_strategy="epoch",
+        eval_strategy="steps",
+        eval_steps=200,
+        save_strategy="steps",
+        save_steps=200,
+        logging_strategy="steps",
+        logging_steps=50,
         learning_rate=2e-5,
         per_device_train_batch_size=8,
         per_device_eval_batch_size=8,
         num_train_epochs=args.epochs,
         weight_decay=0.01,
-        save_total_limit=1,
+        save_total_limit=2,  # Keep best model + latest checkpoint
+        load_best_model_at_end=True,  # Load best model at end
+        metric_for_best_model="eval_f1",  # Use F1 score to determine best model
+        greater_is_better=True,  # Higher F1 is better
         logging_dir='./logs',
+        report_to=None,  # Disable wandb/tensorboard
     )
     
     # Create trainer

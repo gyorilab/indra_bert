@@ -80,11 +80,27 @@ def create_agent_training_examples(clean_text, agent_spans, mutation_spans):
         # Create text with only this agent tagged
         agent_text = clean_text[:agent["start"]] + f"<e>{agent['text']}</e>" + clean_text[agent["end"]:]
         
-        # Find mutations associated with this agent
+        # Find mutations associated with this agent and adjust their positions
         agent_mutations = []
         for mutation in mutation_spans:
             if mutation["role"] == agent["role"]:
-                agent_mutations.append(mutation)
+                # Adjust mutation positions based on where the agent tag was added
+                if mutation["start"] < agent["start"]:
+                    # Mutation is before the agent, no position change needed
+                    adjusted_mutation = mutation.copy()
+                elif mutation["start"] >= agent["end"]:
+                    # Mutation is after the agent, adjust by the tag length difference
+                    tag_length_diff = len(f"<e>{agent['text']}</e>") - len(agent['text'])
+                    adjusted_mutation = {
+                        "start": mutation["start"] + tag_length_diff,
+                        "end": mutation["end"] + tag_length_diff,
+                        "text": mutation["text"],
+                        "role": mutation["role"]
+                    }
+                else:
+                    # Mutation overlaps with agent, skip it
+                    continue
+                agent_mutations.append(adjusted_mutation)
         
         example = {
             "text": agent_text,
