@@ -1,3 +1,14 @@
+#!/bin/bash
+#SBATCH --job-name=atlop-vaccine
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:v100-pcie:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+#SBATCH --time=8:00:00
+#SBATCH --output=atlop_%j.out
+#SBATCH --error=atlop_%j.err
+
+# Load modules
 module load cuda/12.3.0
 module load anaconda3/2024.06
 
