@@ -7,10 +7,10 @@ from itertools import combinations
 
 from huggingface_hub import hf_hub_download
 
-from .ner_agent_detector.model import AgentNERModel
-from .indra_stmt_classifier.model import IndraStmtClassifier
-from .indra_agent_role_assigner.model import IndraAgentsTagger
-from .agent_mutation_detector.model import AgentMutationDetector
+from .ner_agent_detector.inference import AgentNERExtractor
+from .indra_stmt_classifier.inference import IndraStmtClassifier
+from .indra_agent_role_assigner.inference import IndraAgentsTagger
+from .agent_mutation_detector.inference import AgentMutationDetector
 from .utils.annotate import annotate_entities
 import logging
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ class IndraStructuredExtractor:
                  role_model_path="thomaslim6793/indra_bert_indra_stmt_agents_role_assigner",
                  mutations_model_path="thomaslim6793/indra_bert_agent_mutation_detector",
                  stmt_conf_threshold=0.95):
-        self.ner_model = AgentNERModel(ner_model_path)
+        self.ner_model = AgentNERExtractor(ner_model_path)
         self.stmt_model = IndraStmtClassifier(stmt_model_path)
         self.role_model = IndraAgentsTagger(role_model_path)
         self.mutations_model = AgentMutationDetector(mutations_model_path)

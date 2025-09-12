@@ -3,18 +3,19 @@ from pathlib import Path
 import numpy as np
 from datetime import datetime
 from collections import Counter
+import torch
 
 from datasets import Dataset, concatenate_datasets, DatasetDict, load_from_disk
-from transformers import AutoTokenizer, TrainingArguments, DataCollatorWithPadding
+from transformers import AutoTokenizer, TrainingArguments, DataCollatorWithPadding, Trainer
 from sklearn.metrics import precision_recall_fscore_support
 
-from .bert_classification_head import EntitySemanticsUnawareHead
+from .bert_classification_head import TwoGatedClassifier
 from .preprocess import (
     load_and_preprocess_raw_data,
     preprocess_examples_for_model,
     preprocess_negative_examples_for_model
 )
-from .weighted_trainer import WeightedTrainer, compute_class_weights
+from .class_weights_utils import compute_class_weights
 
 
 class DataCollator:
@@ -28,6 +29,45 @@ class DataCollator:
         if self.print_counter < 3:
             print("Example batch item:", self.tokenizer.decode(batch['input_ids'][0]))
             self.print_counter += 1
+        return batch
+
+
+class TwoGatedDataCollator:
+    def __init__(self, tokenizer, no_relation_id, class_weights=None, use_focal_loss=False):
+        self.tokenizer = tokenizer
+        self.default_collator = DataCollatorWithPadding(tokenizer)
+        self.no_relation_id = no_relation_id
+        self.class_weights = class_weights
+        self.use_focal_loss = use_focal_loss
+        self.print_counter = 0
+
+    def __call__(self, features):
+        batch = self.default_collator(features)
+        
+        # Generate Gate 1 labels dynamically
+        gate1_labels = []
+        for label in batch['labels']:
+            if label == self.no_relation_id:
+                gate1_labels.append(0)  # no_relation
+            else:
+                gate1_labels.append(1)  # has_relation
+        
+        batch['gate1_labels'] = torch.tensor(gate1_labels, dtype=torch.long)
+        
+        # Add class weights to batch if available
+        if self.class_weights is not None:
+            batch['class_weights'] = self.class_weights
+        
+        # Add focal loss flag
+        batch['use_focal_loss'] = self.use_focal_loss
+        
+        if self.print_counter < 3:
+            print("Example batch item:", self.tokenizer.decode(batch['input_ids'][0]))
+            print("Gate2 label:", batch['labels'][0].item())
+            print("Gate1 label:", batch['gate1_labels'][0].item())
+            print("Using Focal Loss:", self.use_focal_loss)
+            self.print_counter += 1
+        
         return batch
 
 
@@ -58,6 +98,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--version", default="1.0")
     parser.add_argument("--use_cached_dataset", action="store_true")
+    parser.add_argument("--use_focal_loss", action="store_true", help="Use Focal Loss instead of CrossEntropyLoss")
     return parser.parse_args()
 
 
@@ -144,10 +185,11 @@ def main():
     # ---- Model Setup ----
     training_config = vars(args).copy()  # Convert Namespace -> dict
     training_config["time_created"] = datetime.now().strftime("%Y-%m-%d")
-    model = EntitySemanticsUnawareHead.from_pretrained_with_labels(
+    model = TwoGatedClassifier.from_pretrained_with_labels(
         pretrained_model_name=args.model_name,
         label2id=stmt2id,
         id2label=id2stmt,
+        gate1_threshold=0.5,
         training_config=training_config
     )
     if model.get_input_embeddings().num_embeddings != len(tokenizer):
@@ -172,16 +214,16 @@ def main():
             logging_dir="./logs",
     )
 
+    no_relation_id = stmt2id["No_Relation"]
     class_weights = compute_class_weights(train_dataset)
-    trainer = WeightedTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         tokenizer=tokenizer,
-        data_collator=DataCollator(tokenizer),
+        data_collator=TwoGatedDataCollator(tokenizer, no_relation_id, class_weights, args.use_focal_loss),
         compute_metrics=compute_metrics,
-        class_weights=class_weights,
     )
 
     # ---- Train and Evaluate ----

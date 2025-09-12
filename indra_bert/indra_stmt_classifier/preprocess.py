@@ -4,6 +4,7 @@ from tqdm import tqdm
 from collections import OrderedDict
 from transformers import AutoTokenizer
 import re
+import random
 from typing import List, Dict
 
 from indra_bert.ner_agent_detector.model import AgentNERModel
@@ -112,7 +113,8 @@ def preprocess_negative_examples_for_model(batch, stmt2id, tokenizer):
 
         gold_span_texts = {span["text"] for span in gold_spans}
 
-        per_sample_limit = 5
+        # Generate all valid negative pairs first
+        candidate_pairs = []
         for i in range(len(ner_spans)):
             for j in range(i + 1, len(ner_spans)):
                 span1, span2 = ner_spans[i], ner_spans[j]
@@ -129,39 +131,48 @@ def preprocess_negative_examples_for_model(batch, stmt2id, tokenizer):
                     if any(distractor in g or g in distractor for g in gold_span_texts):
                         continue
 
-                    for ent1, ent2 in [(text1, text2), (text2, text1)]:
-                        try:
-                            temp_text = raw_text
-                            temp_text = re.sub(rf"\b{re.escape(ent1)}\b", f"<e></e>", temp_text, count=1)
-                            temp_text = re.sub(rf"\b{re.escape(ent2)}\b", f"<e></e>", temp_text, count=1)
+                    # Store both orderings as separate candidates
+                    candidate_pairs.append((text1, text2))
+                    candidate_pairs.append((text2, text1))
 
-                            if temp_text.count("<e>") != 2:
-                                continue
+        # Randomly sample up to 5 pairs
+        per_sample_limit = 5
+        if len(candidate_pairs) > per_sample_limit:
+            selected_pairs = random.sample(candidate_pairs, per_sample_limit)
+        else:
+            selected_pairs = candidate_pairs
 
-                            enc = tokenizer(
-                                temp_text,
-                                truncation=True,
-                                max_length=512,
-                                padding=False,
-                                add_special_tokens=True,
-                                return_token_type_ids=True,
-                                return_offsets_mapping=True
-                            )
+        # Process selected pairs
+        for ent1, ent2 in selected_pairs:
+            try:
+                temp_text = raw_text
+                temp_text = re.sub(rf"\b{re.escape(ent1)}\b", f"<e></e>", temp_text, count=1)
+                temp_text = re.sub(rf"\b{re.escape(ent2)}\b", f"<e></e>", temp_text, count=1)
 
-                            negative_examples.append({
-                                "input_ids": enc["input_ids"],
-                                "attention_mask": enc["attention_mask"],
-                                "token_type_ids": enc.get("token_type_ids", [0] * len(enc["input_ids"])),
-                                "labels": stmt2id["No_Relation"],
-                                "stmt_label": "No_Relation",
-                                "stmt_label_id": stmt2id["No_Relation"],
-                            })
-                            per_sample_limit -= 1
-                            if per_sample_limit == 0:
-                                break  # accept only a limited number of negatives per sample
-                        except Exception as e:
-                            logger.error(f"Error processing hard negative: {e}")
-                            continue
+                if temp_text.count("<e>") != 2:
+                    continue
+
+                enc = tokenizer(
+                    temp_text,
+                    truncation=True,
+                    max_length=512,
+                    padding=False,
+                    add_special_tokens=True,
+                    return_token_type_ids=True,
+                    return_offsets_mapping=True
+                )
+
+                negative_examples.append({
+                    "input_ids": enc["input_ids"],
+                    "attention_mask": enc["attention_mask"],
+                    "token_type_ids": enc.get("token_type_ids", [0] * len(enc["input_ids"])),
+                    "labels": stmt2id["No_Relation"],
+                    "stmt_label": "No_Relation",
+                    "stmt_label_id": stmt2id["No_Relation"],
+                })
+            except Exception as e:
+                logger.error(f"Error processing hard negative: {e}")
+                continue
 
     if not negative_examples:
         return {"input_ids": [], "attention_mask": [], "labels": [], "stmt_label": []}

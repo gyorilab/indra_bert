@@ -2,14 +2,16 @@ from transformers import AutoTokenizer
 import torch
 from pathlib import Path
 from .preprocess import preprocess_for_inference, preprocess_for_inference_batch
-from .bert_classification_head import EntitySemanticsUnawareHead
+from .bert_classification_head import TwoGatedClassifier
 
 
 class IndraStmtClassifier:
     def __init__(self, model_path, device=None):
         model_path = Path(model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.model = EntitySemanticsUnawareHead.from_pretrained(model_path)
+        
+        self.model = TwoGatedClassifier.from_pretrained(model_path)
+            
         self.model.eval()
 
         # Device (auto detect)
@@ -27,20 +29,22 @@ class IndraStmtClassifier:
         attention_mask = enc["attention_mask"].to(self.device)
 
         with torch.no_grad():
-            outputs = self.model(
+            # Use two-gated prediction
+            outputs = self.model.predict(
                 input_ids=input_ids,
                 attention_mask=attention_mask
             )
-            logits = outputs.logits
-            probs = torch.softmax(logits, dim=-1)
-            confidence, predicted_class = probs.max(dim=-1)
-            predicted_label = self.id2label[int(predicted_class.item())]
-
-        prob_dist = {label: probs[0][i].item() for i, label in enumerate(self.id2label.values())}
+            predicted_class = outputs['predictions'][0]
+            confidence = outputs['confidences'][0]
+            predicted_label = self.id2label[predicted_class]
+            
+            # Create probability distribution from gate outputs
+            gate2_probs = outputs['gate2_probs'][0]
+            prob_dist = {self.id2label[i]: gate2_probs[i].item() for i in range(len(self.id2label))}
 
         return {
             "predicted_label": predicted_label,
-            "confidence": confidence.item(),
+            "confidence": confidence,
             "probabilities": prob_dist,
             "input_ids": enc["input_ids"],
             "decoded_text": self.tokenizer.decode(enc["input_ids"].squeeze()),
@@ -62,22 +66,20 @@ class IndraStmtClassifier:
 
         # Step 2: Model inference
         with torch.no_grad():
-            outputs = self.model(
+            # Use two-gated prediction
+            outputs = self.model.predict(
                 input_ids=input_ids,
                 attention_mask=attention_mask
             )
-            logits = outputs.logits  # shape: (batch_size, num_classes)
-            probs = torch.softmax(logits, dim=-1)
-            confidences, predicted_classes = probs.max(dim=-1)
+            predicted_classes = outputs['predictions']
+            confidences = outputs['confidences']
+            gate2_probs = outputs['gate2_probs']
 
         results = []
         for i in range(len(texts)):
-
-            predicted_label = self.id2label[int(predicted_classes[i].item())]
-            confidence = confidences[i].item()
-            prob_dist = {
-                self.id2label[j]: probs[i][j].item() for j in range(probs.size(1))
-            }
+            predicted_label = self.id2label[predicted_classes[i]]
+            confidence = confidences[i]
+            prob_dist = {self.id2label[j]: gate2_probs[i][j].item() for j in range(len(self.id2label))}
 
             results.append({
                 "predicted_label": predicted_label,
