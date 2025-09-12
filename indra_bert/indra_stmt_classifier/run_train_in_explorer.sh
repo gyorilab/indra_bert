@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=atlop-vaccine
+#SBATCH --job-name=indra_bert_stmt_classifier_train
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:v100-pcie:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=8:00:00
-#SBATCH --output=atlop_%j.out
-#SBATCH --error=atlop_%j.err
+#SBATCH --output=indra_bert_stmt_classifier_train_%j.out
+#SBATCH --error=indra_bert_stmt_classifier_train_%j.err
 
 # Load modules
 module load cuda/12.3.0
