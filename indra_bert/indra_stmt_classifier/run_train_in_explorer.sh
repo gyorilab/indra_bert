@@ -17,6 +17,7 @@ cd /home/hy.lim/indra_bert
 export CUDA_VISIBLE_DEVICES=0
 
 # Activate conda
+eval "$(conda shell.bash hook)"
 conda activate indra
 
 python -m indra_bert.indra_stmt_classifier.train \
