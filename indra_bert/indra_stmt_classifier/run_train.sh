@@ -12,4 +12,4 @@ python -m indra_bert.indra_stmt_classifier.train \
     --model_name microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract \
     --epochs 8 \
     --version 1.0 \
-    --use_focal_loss 
+    --max_negatives_per_positive 5

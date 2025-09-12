@@ -7,7 +7,7 @@ import re
 import random
 from typing import List, Dict
 
-from indra_bert.ner_agent_detector.model import AgentNERModel
+from indra_bert.ner_agent_detector.inference import AgentNERExtractor
 import logging
 
 logger = logging.getLogger(__name__)
@@ -55,9 +55,7 @@ def map_char_span_to_token_span(char_span, offset_mapping):
 def load_and_preprocess_raw_data(input_path):
     examples = []
     stmt2id = OrderedDict()
-    ner_model = AgentNERModel("thomaslim6793/indra_bert_ner_agent_detection")
-
-    stmt2id['No_Relation'] = len(stmt2id)  # Add a special label for no relation
+    ner_model = AgentNERExtractor("thomaslim6793/indra_bert_ner_agent_detection")
 
     with open(input_path, "r", encoding="utf-8") as f:
         for idx, line in enumerate(tqdm(f, desc="Loading and preprocessing")):
@@ -97,10 +95,9 @@ def preprocess_examples_for_model(examples, tokenizer):
         return_token_type_ids=True
     )
     encoding["labels"] = examples["stmt_label_id"]
-    encoding["stmt_label"] = examples["stmt_label"]  # Optional
     return encoding
 
-def preprocess_negative_examples_for_model(batch, stmt2id, tokenizer):
+def preprocess_negative_examples_for_model(batch, tokenizer):
     negative_examples = []
 
     texts = batch["annotated_text"]
@@ -166,16 +163,14 @@ def preprocess_negative_examples_for_model(batch, stmt2id, tokenizer):
                     "input_ids": enc["input_ids"],
                     "attention_mask": enc["attention_mask"],
                     "token_type_ids": enc.get("token_type_ids", [0] * len(enc["input_ids"])),
-                    "labels": stmt2id["No_Relation"],
-                    "stmt_label": "No_Relation",
-                    "stmt_label_id": stmt2id["No_Relation"],
+                    "labels": -1
                 })
             except Exception as e:
                 logger.error(f"Error processing hard negative: {e}")
                 continue
 
     if not negative_examples:
-        return {"input_ids": [], "attention_mask": [], "labels": [], "stmt_label": []}
+        return {"input_ids": [], "attention_mask": [], "labels": []}
 
     return {key: [d[key] for d in negative_examples] for key in negative_examples[0]}
 

@@ -6,27 +6,6 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 from time import time
 
 
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=1.0, gamma=2.0, weight=None, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.weight = weight
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        ce_loss = F.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
-        pt = torch.exp(-ce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
-
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        else:
-            return focal_loss
-            
-
 class TwoGatedClassifier(PreTrainedModel):
     config_class = AutoConfig
 
@@ -42,7 +21,8 @@ class TwoGatedClassifier(PreTrainedModel):
         # Gate 2: Multi-class classification (specific relation types)
         self.gate2_classifier = nn.Linear(config.hidden_size, config.num_labels)
         
-        self.gate1_threshold = getattr(config, 'gate1_threshold', 0.5)
+        # Make gate1_threshold a learnable parameter
+        self.gate1_threshold = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
 
         self.post_init()
 
@@ -61,9 +41,6 @@ class TwoGatedClassifier(PreTrainedModel):
             id2label=id2label
         )
         
-        # Add gate1_threshold to config
-        config.gate1_threshold = kwargs.pop('gate1_threshold', 0.5)
-        
         # Manually assign any extra fields
         for key, value in kwargs.items():
             setattr(config, key, value)
@@ -72,7 +49,15 @@ class TwoGatedClassifier(PreTrainedModel):
         model.bert = AutoModel.from_pretrained(pretrained_model_name, config=config)
         return model
 
-    def forward(self, input_ids, attention_mask=None, token_type_ids=None, labels=None, gate1_labels=None, class_weights=None, use_focal_loss=True):
+    def forward(self, 
+                input_ids, 
+                attention_mask=None, 
+                token_type_ids=None, 
+                labels=None, 
+                gate1_labels=None, 
+                class_weights=None, 
+                gate1_weights=None
+        ):
         outputs = self.bert(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -91,25 +76,18 @@ class TwoGatedClassifier(PreTrainedModel):
 
         loss = None
         if labels is not None and gate1_labels is not None:
-            # Gate 1 loss (binary) - Focal Loss to handle negative sampling imbalance
-            if use_focal_loss:
-                gate1_loss_fn = FocalLoss(alpha=1.0, gamma=2.0)
-            else:
-                gate1_loss_fn = nn.CrossEntropyLoss()
+            # Gate 1 loss (binary) - CrossEntropy with precomputed class weights
+            if not isinstance(gate1_weights, torch.Tensor):
+                gate1_weights = torch.tensor(gate1_weights, device=gate1_logits.device, dtype=gate1_logits.dtype)
+            gate1_loss_fn = nn.CrossEntropyLoss(weight=gate1_weights)
             gate1_loss = gate1_loss_fn(gate1_logits, gate1_labels)
             
-            # Gate 2 loss (only for positive examples) - Focal Loss + class weights
+            # Gate 2 loss (only for positive examples) - CrossEntropy with class weights
             positive_mask = (gate1_labels == 1)
             if positive_mask.sum() > 0:
-                if use_focal_loss:
-                    # Focal Loss with class weights for rare relations
-                    weight_tensor = torch.tensor(class_weights, device=gate2_logits.device, dtype=gate2_logits.dtype) if class_weights is not None else None
-                    gate2_loss_fn = FocalLoss(alpha=1.0, gamma=2.0, weight=weight_tensor)
-                else:
-                    # Standard loss with class weights
-                    weight_tensor = torch.tensor(class_weights, device=gate2_logits.device, dtype=gate2_logits.dtype) if class_weights is not None else None
-                    gate2_loss_fn = nn.CrossEntropyLoss(weight=weight_tensor)
-                
+                # Standard CrossEntropy loss with class weights for rare relations
+                weight_tensor = torch.tensor(class_weights, device=gate2_logits.device, dtype=gate2_logits.dtype) if class_weights is not None else None
+                gate2_loss_fn = nn.CrossEntropyLoss(weight=weight_tensor)
                 gate2_loss = gate2_loss_fn(gate2_logits[positive_mask], labels[positive_mask])
             else:
                 gate2_loss = torch.tensor(0.0, device=gate1_logits.device)
@@ -117,41 +95,40 @@ class TwoGatedClassifier(PreTrainedModel):
             # Combined loss
             loss = gate1_loss + gate2_loss
 
-        return {
+        # Build result dictionary - only return what we need
+        result_dict = {
             'loss': loss,
-            'gate1_logits': gate1_logits,
-            'gate2_logits': gate2_logits,
-            'hidden_states': outputs.hidden_states,
-            'attentions': outputs.attentions
+            'logits': (gate1_logits, gate2_logits),  # Tuple: (gate1, gate2) for compute_metrics
         }
+        return result_dict
+
 
     def predict(self, input_ids, attention_mask=None, token_type_ids=None):
-        """Two-gated inference"""
+        """Two-gated inference with learnable threshold"""
         with torch.no_grad():
             outputs = self.forward(input_ids, attention_mask, token_type_ids)
             
-            # Gate 1: Check if there's a relation
+            # Gate 1: Binary classification (relation vs no_relation)
             gate1_probs = torch.softmax(outputs['gate1_logits'], dim=-1)
             has_relation_prob = gate1_probs[:, 1]  # Probability of having a relation
             
-            # Gate 2: Get relation type probabilities
+            # Gate 2: Multi-class classification (relation types)
             gate2_probs = torch.softmax(outputs['gate2_logits'], dim=-1)
             
-            # Decision logic
+            # Decision logic using learnable threshold
             predictions = []
             confidences = []
             
             for i in range(len(has_relation_prob)):
                 if has_relation_prob[i] > self.gate1_threshold:
-                    # Has relation, predict specific type
+                    # Gate 1 says "has relation" → use Gate 2 to classify type
                     relation_type_idx = torch.argmax(gate2_probs[i])
                     confidence = has_relation_prob[i] * gate2_probs[i][relation_type_idx]
                     predictions.append(relation_type_idx.item())
                     confidences.append(confidence.item())
                 else:
-                    # No relation - Gate 1 decided this, so return No_Relation
-                    no_relation_idx = self.config.label2id.get("No_Relation", 0)
-                    predictions.append(no_relation_idx)
+                    # Gate 1 says "no relation" → return -1
+                    predictions.append(-1)
                     confidences.append(gate1_probs[i][0].item())  # Confidence in no_relation
             
             return {

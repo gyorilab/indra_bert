@@ -10,8 +10,7 @@ from functools import partial
 from transformers import EvalPrediction
 
 from .preprocess import (
-    preprocess_for_training,
-    preprocess_for_inference
+    preprocess_for_training
 )
 
 from transformers import DataCollatorForTokenClassification

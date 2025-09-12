@@ -36,7 +36,12 @@ class IndraStmtClassifier:
             )
             predicted_class = outputs['predictions'][0]
             confidence = outputs['confidences'][0]
-            predicted_label = self.id2label[predicted_class]
+            
+            # Handle -1 (no relation) predictions
+            if predicted_class == -1:
+                predicted_label = "No_Relation"
+            else:
+                predicted_label = self.id2label[predicted_class]
             
             # Create probability distribution from gate outputs
             gate2_probs = outputs['gate2_probs'][0]
@@ -77,7 +82,12 @@ class IndraStmtClassifier:
 
         results = []
         for i in range(len(texts)):
-            predicted_label = self.id2label[predicted_classes[i]]
+            # Handle -1 (no relation) predictions
+            if predicted_classes[i] == -1:
+                predicted_label = "No_Relation"
+            else:
+                predicted_label = self.id2label[predicted_classes[i]]
+                
             confidence = confidences[i]
             prob_dist = {self.id2label[j]: gate2_probs[i][j].item() for j in range(len(self.id2label))}
 
