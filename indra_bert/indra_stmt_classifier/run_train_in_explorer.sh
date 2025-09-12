@@ -20,7 +20,7 @@ export CUDA_VISIBLE_DEVICES=0
 conda activate indra
 
 python -m indra_bert.indra_stmt_classifier.train \
-    --dataset_path data/indra_benchmark_annotated_data/indra_benchmark_corpus_annotated_stratified_sample.jsonl \
+    --dataset_path data/indra_benchmark_annotated_data/indra_benchmark_corpus_annotated_stratified_sample_2000.jsonl \
     --output_dir output/indra_stmt_classifier \
     --model_name microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract \
     --epochs 8 \
