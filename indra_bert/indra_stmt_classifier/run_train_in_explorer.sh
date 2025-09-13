@@ -24,6 +24,7 @@ python -m indra_bert.indra_stmt_classifier.train \
     --dataset_path data/indra_benchmark_annotated_data/indra_benchmark_corpus_annotated_stratified_sample_2000.jsonl \
     --output_dir output/indra_stmt_classifier \
     --model_name microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract \
+    --use_cached_dataset \
     --epochs 8 \
     --version 1.1 \
     --max_negatives_per_positive 5
