@@ -15,6 +15,7 @@ module load anaconda3/2024.06
 # Set up environment
 cd /home/hy.lim/indra_bert
 export CUDA_VISIBLE_DEVICES=0
+export WANDB_DISABLED=true
 
 # Activate conda
 eval "$(conda shell.bash hook)"
