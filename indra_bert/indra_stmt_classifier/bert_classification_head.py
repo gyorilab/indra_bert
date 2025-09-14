@@ -21,9 +21,6 @@ class TwoGatedClassifier(PreTrainedModel):
         # Gate 2: Multi-class classification (specific relation types)
         self.gate2_classifier = nn.Linear(config.hidden_size, config.num_labels)
         
-        # Make gate1_threshold a learnable parameter
-        self.gate1_threshold = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
-
         self.post_init()
 
     def get_input_embeddings(self):
@@ -115,12 +112,14 @@ class TwoGatedClassifier(PreTrainedModel):
             # Gate 2: Multi-class classification (relation types)
             gate2_probs = torch.softmax(outputs['gate2_logits'], dim=-1)
             
-            # Decision logic using learnable threshold
+            # Decision logic using argmax (standard approach)
             predictions = []
             confidences = []
             
             for i in range(len(has_relation_prob)):
-                if has_relation_prob[i] > self.gate1_threshold:
+                gate1_decision = torch.argmax(gate1_probs[i])  # 0=no_relation, 1=has_relation
+                
+                if gate1_decision == 1:
                     # Gate 1 says "has relation" → use Gate 2 to classify type
                     relation_type_idx = torch.argmax(gate2_probs[i])
                     confidence = has_relation_prob[i] * gate2_probs[i][relation_type_idx]

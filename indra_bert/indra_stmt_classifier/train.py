@@ -134,7 +134,7 @@ def evaluate_model_with_predict(model, dataset, tokenizer):
     predictions = []
     true_labels = []
     
-    print(f"Running evaluation using model.predict() with learned threshold: {model.gate1_threshold.item():.4f}")
+    print(f"Running evaluation using model.predict() with argmax for gate 1 decision")
     
     for i, example in enumerate(dataset):
         # Get the original annotated text
@@ -300,13 +300,17 @@ def main():
             eval_strategy="epoch",
             save_strategy="epoch",
             logging_strategy="epoch",
+            report_to=[],  # Disable all external logging
             learning_rate=2e-5,
             per_device_train_batch_size=8,
             per_device_eval_batch_size=16,
             gradient_accumulation_steps=2,
             num_train_epochs=args.epochs,
             weight_decay=0.01,
-            save_total_limit=1,
+            save_total_limit=1,  # Keep only 1 checkpoint
+            load_best_model_at_end=True,  # Load best model at the end
+            metric_for_best_model="eval_f1_macro",  # Use macro F1 as the metric
+            greater_is_better=True,  # Higher F1 is better
             logging_dir="./logs",
     )
 
