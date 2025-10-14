@@ -16,7 +16,7 @@ def parse_annotated_text(text):
     Returns:
         clean_text: Text without any tags
         agent_spans: List of agent spans with role info
-        mutation_spans: List of mutation spans with role info
+        mutation_spans: List of mutation spans with associated_agent info
     """
     agent_spans = []
     mutation_spans = []
@@ -38,12 +38,12 @@ def parse_annotated_text(text):
         # Determine if this is a mutation or agent
         if tag.endswith('.variant'):
             # This is a mutation
-            role = tag.split('.')[0]
+            associated_agent = tag.split('.')[0]
             mutation_spans.append({
                 "start": span_start,
                 "end": span_end,
                 "text": span_text,
-                "role": role
+                "associated_agent": associated_agent
             })
         else:
             # This is an agent
@@ -64,7 +64,10 @@ def parse_annotated_text(text):
 # ---- Create training examples for each agent ----
 def create_agent_training_examples(clean_text, agent_spans, mutation_spans):
     """
-    Create training examples where each agent gets its own example.
+    Create positive and negative training examples for each agent.
+    
+    Positive examples: BIO tags for variants of the target agent
+    Negative examples: BIO tags for variants of other agents in the same text
     
     Args:
         clean_text: Text without any tags
@@ -72,48 +75,83 @@ def create_agent_training_examples(clean_text, agent_spans, mutation_spans):
         mutation_spans: List of mutation spans
         
     Returns:
-        List of training examples, one per agent
+        List of training examples (positive and negative for each agent)
     """
     examples = []
     
-    for agent in agent_spans:
+    for target_agent in agent_spans:
         # Create text with only this agent tagged
-        agent_text = clean_text[:agent["start"]] + f"<e>{agent['text']}</e>" + clean_text[agent["end"]:]
+        agent_text = clean_text[:target_agent["start"]] + f"<e>{target_agent['text']}</e>" + clean_text[target_agent["end"]:]
         
-        # Find mutations associated with this agent and adjust their positions
-        agent_mutations = []
+        # === POSITIVE EXAMPLE: Target agent's mutations ===
+        positive_mutations = []
         for mutation in mutation_spans:
-            if mutation["role"] == agent["role"]:
+            if mutation["associated_agent"] == target_agent["role"]:
                 # Adjust mutation positions based on where the agent tag was added
-                if mutation["start"] < agent["start"]:
+                if mutation["start"] < target_agent["start"]:
                     # Mutation is before the agent, no position change needed
                     adjusted_mutation = mutation.copy()
-                elif mutation["start"] >= agent["end"]:
+                elif mutation["start"] >= target_agent["end"]:
                     # Mutation is after the agent, adjust by the tag length difference
-                    tag_length_diff = len(f"<e>{agent['text']}</e>") - len(agent['text'])
+                    tag_length_diff = len(f"<e>{target_agent['text']}</e>") - len(target_agent['text'])
                     adjusted_mutation = {
                         "start": mutation["start"] + tag_length_diff,
                         "end": mutation["end"] + tag_length_diff,
                         "text": mutation["text"],
-                        "role": mutation["role"]
+                        "associated_agent": mutation["associated_agent"]
                     }
                 else:
                     # Mutation overlaps with agent, skip it
                     continue
-                agent_mutations.append(adjusted_mutation)
+                positive_mutations.append(adjusted_mutation)
         
-        example = {
+        positive_example = {
             "text": agent_text,
             "clean_text": clean_text,
-            "agent": agent,
-            "mutations": agent_mutations
+            "agent": target_agent,
+            "mutations": positive_mutations,
+            "example_type": "positive"
         }
-        examples.append(example)
+        examples.append(positive_example)
+        
+        # === NEGATIVE EXAMPLES: Other agents' mutations ===
+        other_agents = [agent for agent in agent_spans if agent != target_agent]
+        for other_agent in other_agents:
+            negative_mutations = []
+            for mutation in mutation_spans:
+                if mutation["associated_agent"] == other_agent["role"]:
+                    # Adjust mutation positions based on where the target agent tag was added
+                    if mutation["start"] < target_agent["start"]:
+                        # Mutation is before the target agent, no position change needed
+                        adjusted_mutation = mutation.copy()
+                    elif mutation["start"] >= target_agent["end"]:
+                        # Mutation is after the target agent, adjust by the tag length difference
+                        tag_length_diff = len(f"<e>{target_agent['text']}</e>") - len(target_agent['text'])
+                        adjusted_mutation = {
+                            "start": mutation["start"] + tag_length_diff,
+                            "end": mutation["end"] + tag_length_diff,
+                            "text": mutation["text"],
+                            "associated_agent": mutation["associated_agent"]
+                        }
+                    else:
+                        # Mutation overlaps with target agent, skip it
+                        continue
+                    negative_mutations.append(adjusted_mutation)
+            
+            negative_example = {
+                "text": agent_text,
+                "clean_text": clean_text,
+                "agent": target_agent,  # Target agent for context
+                "mutations": negative_mutations,
+                "example_type": "negative",
+                "other_agent": other_agent
+            }
+            examples.append(negative_example)
     
     return examples
 
 # ---- Assign BIO tags for mutation detection ----
-def char_to_token_labels(tokens, token_offsets, mutation_spans):
+def char_to_token_labels(tokens, token_offsets, mutation_spans, example_type="positive"):
     """
     Assign BIO tags to tokens for mutation detection.
     
@@ -121,12 +159,20 @@ def char_to_token_labels(tokens, token_offsets, mutation_spans):
         tokens: List of tokens
         token_offsets: List of (start, end) character positions for each token
         mutation_spans: List of mutation spans
+        example_type: "positive" or "negative" - determines how mutations are labeled
         
     Returns:
         List of BIO labels for each token
     """
     labels = ["O"] * len(tokens)
     
+    # For negative examples, mutations should be labeled as "O" (not mutations for target agent)
+    # For positive examples, mutations should be labeled as "B-mutation" or "I-mutation"
+    if example_type == "negative":
+        # In negative examples, all mutations are labeled as "O" (not relevant to target agent)
+        return labels
+    
+    # For positive examples, label mutations as B-mutation/I-mutation
     for mutation in mutation_spans:
         start_char = mutation["start"]
         end_char = mutation["end"]
@@ -146,29 +192,47 @@ def char_to_token_labels(tokens, token_offsets, mutation_spans):
     return labels
 
 # ---- Load and preprocess training data ----
-def load_and_preprocess_training_data(input_path):
+def load_and_preprocess_training_data(input_path, pubtator3_format=False):
     """
-    Load JSONL file and preprocess for mutation detection training.
+    Load JSONL or JSON file and preprocess for mutation detection training.
     
     Args:
-        input_path: Path to JSONL file with variant annotations
+        input_path: Path to JSONL file (INDRA format) or JSON file (PubTator3 format)
+        pubtator3_format: If True, expect JSON array format from PubTator3.
+                         If False, expect JSONL format from INDRA.
         
     Returns:
         List of training examples
     """
     examples = []
     
-    with open(input_path, 'r') as f:
-        for line in tqdm(f, desc="Loading training data"):
-            if line.strip():
-                data = json.loads(line)
-                
-                # Parse the annotated text
-                clean_text, agent_spans, mutation_spans = parse_annotated_text(data["annotated_text"])
-                
-                # Create training examples for each agent
-                agent_examples = create_agent_training_examples(clean_text, agent_spans, mutation_spans)
-                examples.extend(agent_examples)
+    if pubtator3_format:
+        # Load JSON array format (PubTator3)
+        print(f"Loading PubTator3 format from {input_path}...")
+        with open(input_path, 'r') as f:
+            data_list = json.load(f)
+        
+        for data in tqdm(data_list, desc="Loading training data"):
+            # Parse the annotated text
+            clean_text, agent_spans, mutation_spans = parse_annotated_text(data["annotated_text"])
+            
+            # Create training examples for each agent
+            agent_examples = create_agent_training_examples(clean_text, agent_spans, mutation_spans)
+            examples.extend(agent_examples)
+    else:
+        # Load JSONL format (INDRA)
+        print(f"Loading INDRA JSONL format from {input_path}...")
+        with open(input_path, 'r') as f:
+            for line in tqdm(f, desc="Loading training data"):
+                if line.strip():
+                    data = json.loads(line)
+                    
+                    # Parse the annotated text
+                    clean_text, agent_spans, mutation_spans = parse_annotated_text(data["annotated_text"])
+                    
+                    # Create training examples for each agent
+                    agent_examples = create_agent_training_examples(clean_text, agent_spans, mutation_spans)
+                    examples.extend(agent_examples)
     
     return examples
 
@@ -217,6 +281,7 @@ def tokenize_examples(examples, tokenizer, label2id, max_length=512):
     for example in tqdm(examples, desc="Tokenizing examples"):
         text = example["text"]
         mutations = example["mutations"]
+        example_type = example.get("example_type", "positive")
         
         # Tokenize
         encoding = tokenizer(
@@ -231,8 +296,8 @@ def tokenize_examples(examples, tokenizer, label2id, max_length=512):
         tokens = tokenizer.convert_ids_to_tokens(encoding["input_ids"].squeeze(0))
         token_offsets = encoding["offset_mapping"].squeeze(0).tolist()
         
-        # Assign BIO labels
-        labels = char_to_token_labels(tokens, token_offsets, mutations)
+        # Assign BIO labels based on example type
+        labels = char_to_token_labels(tokens, token_offsets, mutations, example_type)
         
         # Convert labels to IDs using the correct mapping
         label_ids = [label2id["O"]] * len(tokens)  # Default to "O"
@@ -245,7 +310,9 @@ def tokenize_examples(examples, tokenizer, label2id, max_length=512):
             "labels": torch.tensor(label_ids),
             "tokens": tokens,
             "text": text,
-            "mutations": mutations
+            "mutations": mutations,
+            "example_type": example_type,
+            "agent": example.get("agent")
         }
         
         tokenized_examples.append(tokenized_example)
@@ -253,14 +320,15 @@ def tokenize_examples(examples, tokenizer, label2id, max_length=512):
     return tokenized_examples
 
 # ---- Main preprocessing function ----
-def preprocess_for_training(input_path, tokenizer, max_length=512):
+def preprocess_for_training(input_path, tokenizer, max_length=512, pubtator3_format=False):
     """
     Main function to preprocess data for mutation detection training.
     
     Args:
-        input_path: Path to JSONL file with variant annotations
+        input_path: Path to JSONL file (INDRA) or JSON file (PubTator3) with variant annotations
         tokenizer: HuggingFace tokenizer
         max_length: Maximum sequence length
+        pubtator3_format: If True, expect JSON array format from PubTator3
         
     Returns:
         tokenized_examples: List of tokenized training examples
@@ -268,7 +336,7 @@ def preprocess_for_training(input_path, tokenizer, max_length=512):
         id2label: ID to label mapping
     """
     # Load and preprocess data
-    examples = load_and_preprocess_training_data(input_path)
+    examples = load_and_preprocess_training_data(input_path, pubtator3_format=pubtator3_format)
     
     # Build label mappings
     label2id, id2label = build_label_mappings(examples)

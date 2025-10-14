@@ -92,11 +92,19 @@ class TwoGatedClassifier(PreTrainedModel):
             # Combined loss
             loss = gate1_loss + gate2_loss
 
-        # Build result dictionary - only return what we need
-        result_dict = {
-            'loss': loss,
-            'logits': (gate1_logits, gate2_logits),  # Tuple: (gate1, gate2) for compute_metrics
-        }
+        # Build result dictionary
+        if labels is not None and gate1_labels is not None:
+            # Training mode - return tuple format for compute_metrics
+            result_dict = {
+                'loss': loss,
+                'logits': (gate1_logits, gate2_logits),  # Tuple: (gate1, gate2) for compute_metrics
+            }
+        else:
+            # Inference mode - return separate logits for predict method
+            result_dict = {
+                'gate1_logits': gate1_logits,
+                'gate2_logits': gate2_logits,
+            }
         return result_dict
 
 

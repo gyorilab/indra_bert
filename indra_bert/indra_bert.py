@@ -12,6 +12,7 @@ from .indra_stmt_classifier.inference import IndraStmtClassifier
 from .indra_agent_role_assigner.inference import IndraAgentsTagger
 from .agent_mutation_detector.inference import AgentMutationDetector
 from .utils.annotate import annotate_entities
+from .utils.parse_mutation import convert_to_indra_mutations
 import logging
 logger = logging.getLogger(__name__)
 
@@ -220,7 +221,10 @@ class IndraStructuredExtractor:
                 }
                 
                 if mutations_pred.get((start, end, name), None):
-                    agent_roles[role]["mutations"] = mutations_pred[(start, end, name)]
+                    # Parse mutations to INDRA-compatible format
+                    raw_mutations = mutations_pred[(start, end, name)]
+                    parsed_mutations = convert_to_indra_mutations(raw_mutations)
+                    agent_roles[role]["mutations"] = parsed_mutations
 
             indra_stmt = {
                 "type": stmt_type,

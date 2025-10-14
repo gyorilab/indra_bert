@@ -6,18 +6,20 @@ from typing import List, Dict, Tuple, Any
 class AgentMutationDetector:
     def __init__(self, model_path: str):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        # Add special tokens to match training setup
+        self.tokenizer.add_special_tokens({'additional_special_tokens': ['<e>', '</e>']})
         self.model = AutoModelForTokenClassification.from_pretrained(model_path)
         self.label2id = self.model.config.label2id
         self.id2label = self.model.config.id2label
         
         self.model.eval()
 
-    def predict(self, pair: List[Dict], annotated_text: str) -> Dict[str, Any]:
+    def predict(self, agents: List[Dict], annotated_text: str) -> Dict[str, Any]:
         """
         Predict mutations for each agent in the pair.
         
         Args:
-            pair: List of agent entities [{"start": 27, "end": 32, "text": "Hsp70"}, ...]
+            agents: List of agent entities [{"start": 27, "end": 32, "text": "Hsp70"}, ...]
             annotated_text: Text with all agents marked with <e></e> tags
             
         Returns:
@@ -25,7 +27,7 @@ class AgentMutationDetector:
         """
         mutations_dict = {}
         
-        for agent in pair:
+        for agent in agents:
             # Create modified text with only current agent tagged
             modified_text = self._create_single_agent_text(annotated_text, agent)
             
@@ -40,11 +42,8 @@ class AgentMutationDetector:
         
         return {
             "mutations": mutations_dict,
-            "raw_output": {
-                "pair": pair,
-                "annotated_text": annotated_text,
-                "mutations_dict": mutations_dict
-            }
+            "agents": agents,
+            "annotated_text": annotated_text
         }
 
     def predict_batch(self, pairs: List[List[Dict]], annotated_texts: List[str]) -> List[Dict[str, Any]]:
@@ -182,52 +181,16 @@ class AgentMutationDetector:
             text: Original text
             
         Returns:
-            List of mutation dictionaries
+            List of mutation dictionaries with start, end, text fields (matching training format)
         """
         mutations = []
         
         for span in mutation_spans:
-            mutation_text = span["text"]
-            
-            # Try to parse mutation format (e.g., "E123L", "K77R")
-            mutation_info = self._parse_mutation_text(mutation_text)
-            if mutation_info:
-                mutations.append(mutation_info)
-            else:
-                # If parsing fails, create a generic mutation
-                mutations.append({
-                    "position": "unknown",
-                    "residue_from": "unknown", 
-                    "residue_to": "unknown",
-                    "text": mutation_text
-                })
+            mutations.append({
+                "start": span["start"],
+                "end": span["end"], 
+                "text": span["text"]
+            })
         
         return mutations
 
-    def _parse_mutation_text(self, mutation_text: str) -> Dict:
-        """
-        Parse mutation text to extract position and residue changes.
-        
-        Args:
-            mutation_text: Text like "E123L", "K77R", etc.
-            
-        Returns:
-            Dictionary with parsed mutation info or None if parsing fails
-        """
-        # Pattern for single letter mutations: E123L, K77R, etc.
-        pattern = r'^([A-Z])(\d+)([A-Z])$'
-        match = re.match(pattern, mutation_text)
-        
-        if match:
-            residue_from = match.group(1)
-            position = match.group(2)
-            residue_to = match.group(3)
-            
-            return {
-                "position": position,
-                "residue_from": residue_from,
-                "residue_to": residue_to,
-                "text": mutation_text
-            }
-        
-        return None
