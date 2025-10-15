@@ -186,6 +186,8 @@ def parse_args():
     parser.add_argument("--dev_ratio", type=float, default=0.1, help="Ratio of dev data (default: 0.1)")
     parser.add_argument("--test_ratio", type=float, default=0.1, help="Ratio of test data (default: 0.1)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--max_negative_examples_per_agent", type=int, default=1, help="Maximum negative examples per agent (default: 1)")
+    parser.add_argument("--max_total_examples", type=int, default=None, help="Maximum total training examples (default: None, use all)")
     
     return parser.parse_args()
 
@@ -246,8 +248,15 @@ def main():
         # Preprocess data
         print("Preprocessing data...")
         all_examples, label2id, id2label = preprocess_for_training(
-            args.dataset_path, tokenizer, max_length=512, pubtator3_format=args.pubtator3_format
+            args.dataset_path, tokenizer, max_length=512, pubtator3_format=args.pubtator3_format,
+            max_negative_examples_per_agent=args.max_negative_examples_per_agent
         )
+        
+        # Sample examples if max_total_examples is specified
+        if args.max_total_examples is not None and len(all_examples) > args.max_total_examples:
+            print(f"Sampling {args.max_total_examples} examples from {len(all_examples)} total examples")
+            random.shuffle(all_examples)
+            all_examples = all_examples[:args.max_total_examples]
         
         # Shuffle examples for random split
         random.shuffle(all_examples)

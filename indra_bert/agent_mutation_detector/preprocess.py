@@ -1,5 +1,6 @@
 import json
 import re
+import random
 from pathlib import Path
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer
@@ -62,20 +63,21 @@ def parse_annotated_text(text):
     return clean_text, agent_spans, mutation_spans
 
 # ---- Create training examples for each agent ----
-def create_agent_training_examples(clean_text, agent_spans, mutation_spans):
+def create_agent_training_examples(clean_text, agent_spans, mutation_spans, max_negative_examples_per_agent=1):
     """
     Create positive and negative training examples for each agent.
     
     Positive examples: BIO tags for variants of the target agent
-    Negative examples: BIO tags for variants of other agents in the same text
+    Negative examples: BIO tags for variants of other agents in the same text (randomly sampled)
     
     Args:
         clean_text: Text without any tags
         agent_spans: List of agent spans
         mutation_spans: List of mutation spans
+        max_negative_examples_per_agent: Maximum number of negative examples per agent (default: 1)
         
     Returns:
-        List of training examples (positive and negative for each agent)
+        List of training examples (positive and randomly sampled negative for each agent)
     """
     examples = []
     
@@ -114,9 +116,16 @@ def create_agent_training_examples(clean_text, agent_spans, mutation_spans):
         }
         examples.append(positive_example)
         
-        # === NEGATIVE EXAMPLES: Other agents' mutations ===
+        # === NEGATIVE EXAMPLES: Other agents' mutations (limited by max_negative_examples_per_agent) ===
         other_agents = [agent for agent in agent_spans if agent != target_agent]
+        # Randomly sample negative examples for better diversity
+        random.shuffle(other_agents)
+        negative_examples_created = 0
+        
         for other_agent in other_agents:
+            if negative_examples_created >= max_negative_examples_per_agent:
+                break
+                
             negative_mutations = []
             for mutation in mutation_spans:
                 if mutation["associated_agent"] == other_agent["role"]:
@@ -147,6 +156,7 @@ def create_agent_training_examples(clean_text, agent_spans, mutation_spans):
                 "other_agent": other_agent
             }
             examples.append(negative_example)
+            negative_examples_created += 1
     
     return examples
 
@@ -192,7 +202,7 @@ def char_to_token_labels(tokens, token_offsets, mutation_spans, example_type="po
     return labels
 
 # ---- Load and preprocess training data ----
-def load_and_preprocess_training_data(input_path, pubtator3_format=False):
+def load_and_preprocess_training_data(input_path, pubtator3_format=False, max_negative_examples_per_agent=1):
     """
     Load JSONL or JSON file and preprocess for mutation detection training.
     
@@ -200,6 +210,7 @@ def load_and_preprocess_training_data(input_path, pubtator3_format=False):
         input_path: Path to JSONL file (INDRA format) or JSON file (PubTator3 format)
         pubtator3_format: If True, expect JSON array format from PubTator3.
                          If False, expect JSONL format from INDRA.
+        max_negative_examples_per_agent: Maximum number of negative examples per agent
         
     Returns:
         List of training examples
@@ -217,7 +228,7 @@ def load_and_preprocess_training_data(input_path, pubtator3_format=False):
             clean_text, agent_spans, mutation_spans = parse_annotated_text(data["annotated_text"])
             
             # Create training examples for each agent
-            agent_examples = create_agent_training_examples(clean_text, agent_spans, mutation_spans)
+            agent_examples = create_agent_training_examples(clean_text, agent_spans, mutation_spans, max_negative_examples_per_agent)
             examples.extend(agent_examples)
     else:
         # Load JSONL format (INDRA)
@@ -231,7 +242,7 @@ def load_and_preprocess_training_data(input_path, pubtator3_format=False):
                     clean_text, agent_spans, mutation_spans = parse_annotated_text(data["annotated_text"])
                     
                     # Create training examples for each agent
-                    agent_examples = create_agent_training_examples(clean_text, agent_spans, mutation_spans)
+                    agent_examples = create_agent_training_examples(clean_text, agent_spans, mutation_spans, max_negative_examples_per_agent)
                     examples.extend(agent_examples)
     
     return examples
@@ -321,7 +332,7 @@ def tokenize_examples(examples, tokenizer, label2id, max_length=512):
     return tokenized_examples
 
 # ---- Main preprocessing function ----
-def preprocess_for_training(input_path, tokenizer, max_length=512, pubtator3_format=False):
+def preprocess_for_training(input_path, tokenizer, max_length=512, pubtator3_format=False, max_negative_examples_per_agent=1):
     """
     Main function to preprocess data for mutation detection training.
     
@@ -337,7 +348,7 @@ def preprocess_for_training(input_path, tokenizer, max_length=512, pubtator3_for
         id2label: ID to label mapping
     """
     # Load and preprocess data
-    examples = load_and_preprocess_training_data(input_path, pubtator3_format=pubtator3_format)
+    examples = load_and_preprocess_training_data(input_path, pubtator3_format=pubtator3_format, max_negative_examples_per_agent=max_negative_examples_per_agent)
     
     # Build label mappings
     label2id, id2label = build_label_mappings(examples)

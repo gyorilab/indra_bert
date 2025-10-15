@@ -13,4 +13,6 @@ python -m indra_bert.agent_mutation_detector.train \
     --epochs 15 \
     --version 2.0 \
     --pubtator3_format \
-    --use_cached_dataset
+    --use_cached_dataset \
+    --max_negative_examples_per_agent 1 \
+    --max_total_examples 100000
