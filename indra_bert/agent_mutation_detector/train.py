@@ -193,7 +193,9 @@ def parse_args():
     return parser.parse_args()
 
 def main():
+    print("Starting training script...")
     args = parse_args()
+    print(f"Arguments parsed successfully. Output dir: {args.output_dir}")
     
     # Validate split ratios
     total_ratio = args.train_ratio + args.dev_ratio + args.test_ratio
@@ -211,6 +213,9 @@ def main():
     
     # Check for cached dataset
     cache_dir = Path(args.output_dir) / "cached_dataset"
+    print(f"Checking for cached dataset at: {cache_dir}")
+    print(f"Cache exists: {cache_dir.exists()}")
+    print(f"Use cached dataset: {args.use_cached_dataset}")
     
     if args.use_cached_dataset and cache_dir.exists():
         print(f"Loading cached dataset from {cache_dir}")
@@ -250,6 +255,7 @@ def main():
             print("Falling back to preprocessing from scratch...")
             skip_preprocessing = False
     else:
+        print("Cache not found or not using cached dataset - will preprocess from scratch")
         skip_preprocessing = False
     
     if not skip_preprocessing:
