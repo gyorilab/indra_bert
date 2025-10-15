@@ -189,6 +189,7 @@ def parse_args():
     parser.add_argument("--max_negative_examples_per_agent", type=int, default=1, help="Maximum negative examples per agent (default: 1)")
     parser.add_argument("--max_total_examples", type=int, default=None, help="Maximum total training examples (default: None, use all)")
     parser.add_argument("--batch_size", type=int, default=8, help="Training batch size (default: 8)")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint directory to resume from, or 'latest' to auto-detect (default: None)")
     
     return parser.parse_args()
 
@@ -373,7 +374,29 @@ def main():
     
     # Train model
     print("Starting training...")
-    trainer.train()
+    if args.resume_from_checkpoint:
+        checkpoint_path = args.resume_from_checkpoint
+        
+        # Auto-detect latest checkpoint if 'latest' is specified
+        if checkpoint_path == "latest":
+            output_dir = Path(args.output_dir)
+            checkpoint_dirs = [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")]
+            if checkpoint_dirs:
+                # Sort by step number and get the latest
+                latest_checkpoint = max(checkpoint_dirs, key=lambda x: int(x.name.split("-")[1]))
+                checkpoint_path = str(latest_checkpoint)
+                print(f"Auto-detected latest checkpoint: {checkpoint_path}")
+            else:
+                print("No checkpoints found, starting from scratch")
+                checkpoint_path = None
+        
+        if checkpoint_path:
+            print(f"Resuming from checkpoint: {checkpoint_path}")
+            trainer.train(resume_from_checkpoint=checkpoint_path)
+        else:
+            trainer.train()
+    else:
+        trainer.train()
     
     # Save final model
     trainer.save_model()
