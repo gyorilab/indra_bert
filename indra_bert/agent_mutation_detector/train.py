@@ -188,6 +188,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--max_negative_examples_per_agent", type=int, default=1, help="Maximum negative examples per agent (default: 1)")
     parser.add_argument("--max_total_examples", type=int, default=None, help="Maximum total training examples (default: None, use all)")
+    parser.add_argument("--batch_size", type=int, default=8, help="Training batch size (default: 8)")
     
     return parser.parse_args()
 
@@ -330,8 +331,8 @@ def main():
         logging_strategy="steps",
         logging_steps=50,
         learning_rate=2e-5,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
         num_train_epochs=args.epochs,
         weight_decay=0.01,
         save_total_limit=2,  # Keep best model + latest checkpoint

@@ -341,6 +341,8 @@ def preprocess_for_training(input_path, tokenizer, max_length=512, pubtator3_for
         tokenizer: HuggingFace tokenizer
         max_length: Maximum sequence length
         pubtator3_format: If True, expect JSON array format from PubTator3
+        max_negative_examples_per_agent: Maximum negative examples per agent
+        max_total_examples: Maximum total examples to use (None = use all)
         
     Returns:
         tokenized_examples: List of tokenized training examples
