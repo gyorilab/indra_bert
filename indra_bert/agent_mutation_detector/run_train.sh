@@ -7,9 +7,9 @@ conda activate indra_gpt
 cd ~/gyorilab/indra_bert
 
 python -m indra_bert.agent_mutation_detector.train \
-    --dataset_path data/indra_benchmark_annotated_data/variants_annotated_data/indra_benchmark_corpus_variants_annotated.jsonl \
+    --dataset_path data/pubtator3/pubtator3_BioCXML_0_protein_variants.json \
     --output_dir output/agent_mutation_detection \
     --model_name microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract \
-    --epochs 8 \
-    --version 1.0 \
-    --use_cached_dataset
+    --epochs 15 \
+    --version 2.0 \
+    --pubtator3_format
