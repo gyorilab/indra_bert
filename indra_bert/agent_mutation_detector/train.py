@@ -235,10 +235,12 @@ def main():
             print(f"  Test: {len(test_dataset)} examples")
             print(f"  Labels: {len(label2id)} classes")
             
-            # Convert cached datasets to examples format for compatibility
-            train_examples = [train_dataset[i] for i in range(len(train_dataset))]
-            dev_examples = [dev_dataset[i] for i in range(len(dev_dataset))]
-            test_examples = [test_dataset[i] for i in range(len(test_dataset))]
+            # Convert cached datasets to examples format efficiently
+            print("Converting cached datasets to examples format...")
+            train_examples = train_dataset.to_list()
+            dev_examples = dev_dataset.to_list()
+            test_examples = test_dataset.to_list()
+            print(f"Conversion completed: {len(train_examples)} train, {len(dev_examples)} dev, {len(test_examples)} test")
             
             # Skip preprocessing since we loaded from cache
             skip_preprocessing = True
