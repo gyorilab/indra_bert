@@ -202,48 +202,91 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     
-    # Load tokenizer and add special tokens
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    tokenizer.add_special_tokens({'additional_special_tokens': ['<e>', '</e>']})
-    
-    # Preprocess data
-    print("Preprocessing data...")
-    all_examples, label2id, id2label = preprocess_for_training(
-        args.dataset_path, tokenizer, max_length=512, pubtator3_format=args.pubtator3_format
-    )
-    
-    # Shuffle examples for random split
-    random.shuffle(all_examples)
-    
-    # Split into train/dev/test
-    n_total = len(all_examples)
-    n_train = int(args.train_ratio * n_total)
-    n_dev = int(args.dev_ratio * n_total)
-    
-    train_examples = all_examples[:n_train]
-    dev_examples = all_examples[n_train:n_train + n_dev]
-    test_examples = all_examples[n_train + n_dev:]
-    
-    print(f"Total examples: {n_total}")
-    print(f"Training examples: {len(train_examples)} ({args.train_ratio*100:.1f}%)")
-    print(f"Dev examples: {len(dev_examples)} ({args.dev_ratio*100:.1f}%)")
-    print(f"Test examples: {len(test_examples)} ({args.test_ratio*100:.1f}%)")
-    print(f"Labels: {label2id}")
-    
-    # Create datasets
-    train_dataset = Dataset.from_list(train_examples)
-    dev_dataset = Dataset.from_list(dev_examples)
-    test_dataset = Dataset.from_list(test_examples)
-    
-    # Save dataset splits
-    dataset_dict = DatasetDict({
-        'train': train_dataset,
-        'validation': dev_dataset,
-        'test': test_dataset
-    })
+    # Check for cached dataset
     cache_dir = Path(args.output_dir) / "cached_dataset"
-    dataset_dict.save_to_disk(cache_dir)
-    print(f"Cached dataset splits saved to {cache_dir}")
+    
+    if args.use_cached_dataset and cache_dir.exists():
+        print(f"Loading cached dataset from {cache_dir}")
+        try:
+            dataset_dict = DatasetDict.load_from_disk(str(cache_dir))
+            train_dataset = dataset_dict['train']
+            dev_dataset = dataset_dict['validation'] 
+            test_dataset = dataset_dict['test']
+            
+            # Load label mappings from cache
+            label2id_path = cache_dir / "label2id.json"
+            if label2id_path.exists():
+                with open(label2id_path, 'r') as f:
+                    label2id = json.load(f)
+                id2label = {v: k for k, v in label2id.items()}
+            else:
+                raise FileNotFoundError("label2id.json not found in cache")
+                
+            print(f"Successfully loaded cached dataset:")
+            print(f"  Train: {len(train_dataset)} examples")
+            print(f"  Dev: {len(dev_dataset)} examples") 
+            print(f"  Test: {len(test_dataset)} examples")
+            print(f"  Labels: {len(label2id)} classes")
+            
+            # Skip preprocessing since we loaded from cache
+            skip_preprocessing = True
+            
+        except Exception as e:
+            print(f"Warning: Failed to load cached dataset: {e}")
+            print("Falling back to preprocessing from scratch...")
+            skip_preprocessing = False
+    else:
+        skip_preprocessing = False
+    
+    if not skip_preprocessing:
+        # Load tokenizer and add special tokens
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+        tokenizer.add_special_tokens({'additional_special_tokens': ['<e>', '</e>']})
+        
+        # Preprocess data
+        print("Preprocessing data...")
+        all_examples, label2id, id2label = preprocess_for_training(
+            args.dataset_path, tokenizer, max_length=512, pubtator3_format=args.pubtator3_format
+        )
+        
+        # Shuffle examples for random split
+        random.shuffle(all_examples)
+        
+        # Split into train/dev/test
+        n_total = len(all_examples)
+        n_train = int(args.train_ratio * n_total)
+        n_dev = int(args.dev_ratio * n_total)
+        
+        train_examples = all_examples[:n_train]
+        dev_examples = all_examples[n_train:n_train + n_dev]
+        test_examples = all_examples[n_train + n_dev:]
+        
+        print(f"Total examples: {n_total}")
+        print(f"Training examples: {len(train_examples)} ({args.train_ratio*100:.1f}%)")
+        print(f"Dev examples: {len(dev_examples)} ({args.dev_ratio*100:.1f}%)")
+        print(f"Test examples: {len(test_examples)} ({args.test_ratio*100:.1f}%)")
+        print(f"Labels: {label2id}")
+        
+        # Create datasets
+        train_dataset = Dataset.from_list(train_examples)
+        dev_dataset = Dataset.from_list(dev_examples)
+        test_dataset = Dataset.from_list(test_examples)
+        
+        # Save dataset splits and label mappings to cache
+        dataset_dict = DatasetDict({
+            'train': train_dataset,
+            'validation': dev_dataset,
+            'test': test_dataset
+        })
+        cache_dir = Path(args.output_dir) / "cached_dataset"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        dataset_dict.save_to_disk(cache_dir)
+        
+        # Save label mappings
+        with open(cache_dir / "label2id.json", 'w') as f:
+            json.dump(label2id, f, indent=2)
+        
+        print(f"Cached dataset splits and label mappings saved to {cache_dir}")
     
     # Create model config
     config = AutoConfig.from_pretrained(

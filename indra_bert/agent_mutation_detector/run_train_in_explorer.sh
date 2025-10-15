@@ -27,5 +27,6 @@ python -m indra_bert.agent_mutation_detector.train \
     --model_name microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract \
     --epochs 15 \
     --version 2.0 \
-    --pubtator3_format
+    --pubtator3_format \
+    --use_cached_dataset
 
