@@ -205,6 +205,10 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     
+    # Load tokenizer and add special tokens (always needed)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer.add_special_tokens({'additional_special_tokens': ['<e>', '</e>']})
+    
     # Check for cached dataset
     cache_dir = Path(args.output_dir) / "cached_dataset"
     
