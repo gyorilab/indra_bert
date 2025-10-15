@@ -312,7 +312,8 @@ def tokenize_examples(examples, tokenizer, label2id, max_length=512):
             "text": text,
             "mutations": mutations,
             "example_type": example_type,
-            "agent": example.get("agent")
+            "agent": example.get("agent"),
+            "offset_mapping": token_offsets
         }
         
         tokenized_examples.append(tokenized_example)

@@ -54,7 +54,7 @@ class DataCollatorWithDebug(DataCollatorForTokenClassification):
 # ---- Metrics ----
 def compute_metrics_span_level(eval_preds: EvalPrediction, inputs, id2label, texts):
     """
-    Compute span-level metrics for mutation detection.
+    Compute span-level metrics for mutation detection using actual character spans.
     """
     predictions = eval_preds.predictions
     labels = eval_preds.label_ids
@@ -65,19 +65,21 @@ def compute_metrics_span_level(eval_preds: EvalPrediction, inputs, id2label, tex
         pred_ids = np.argmax(predictions[i], axis=1).tolist()
         gold_ids = labels[i].tolist()
 
-        tokens = inputs[i]["tokens"]
+        # Get the original mutation spans from training data
+        original_mutations = inputs[i]["mutations"]
         text = texts[i]
         
-        # Create dummy offsets since we don't have them in the input
-        # This is a simplified approach - in practice you'd want to store offsets
-        offsets = [(0, len(token)) for token in tokens]
+        # Extract predicted mutation spans using actual token offsets
+        pred_spans = extract_mutation_spans_from_predictions(
+            inputs[i]["tokens"], pred_ids, id2label, text, inputs[i].get("offset_mapping")
+        )
+        
+        # Use original mutation spans as gold standard
+        gold_spans = original_mutations
 
-        # Extract mutation spans from predictions and labels
-        pred_spans = extract_mutation_spans(tokens, offsets, pred_ids, id2label, text)
-        gold_spans = extract_mutation_spans(tokens, offsets, gold_ids, id2label, text)
-
-        pred_set = {(s["start"], s["end"], s["text"]) for s in pred_spans}
-        gold_set = {(s["start"], s["end"], s["text"]) for s in gold_spans}
+        # Compare spans using character positions
+        pred_set = {(s["start"], s["end"]) for s in pred_spans}
+        gold_set = {(s["start"], s["end"]) for s in gold_spans}
 
         TP += len(pred_set & gold_set)
         FP += len(pred_set - gold_set)
@@ -88,6 +90,50 @@ def compute_metrics_span_level(eval_preds: EvalPrediction, inputs, id2label, tex
     f1 = 2 * precision * recall / (precision + recall + 1e-8)
 
     return {"precision": precision, "recall": recall, "f1": f1}
+
+def extract_mutation_spans_from_predictions(tokens, predictions, id2label, original_text, offset_mapping=None):
+    """
+    Extract mutation spans from token-level predictions using actual character offsets.
+    """
+    mutation_spans = []
+    current_span = None
+    
+    for i, (token, pred_id) in enumerate(zip(tokens, predictions)):
+        if offset_mapping and i < len(offset_mapping):
+            offset = offset_mapping[i]
+        else:
+            # Fallback: create approximate offsets
+            offset = (0, len(token))
+            
+        if offset[0] == offset[1]:  # Skip special tokens
+            continue
+            
+        label = id2label.get(pred_id, "O")
+        
+        if label == "B-mutation":
+            # Start new mutation span
+            if current_span:
+                mutation_spans.append(current_span)
+            current_span = {
+                "start": offset[0],
+                "end": offset[1],
+                "text": original_text[offset[0]:offset[1]]
+            }
+        elif label == "I-mutation" and current_span:
+            # Continue current mutation span
+            current_span["end"] = offset[1]
+            current_span["text"] = original_text[current_span["start"]:offset[1]]
+        else:
+            # End current span if exists
+            if current_span:
+                mutation_spans.append(current_span)
+                current_span = None
+    
+    # Add final span if exists
+    if current_span:
+        mutation_spans.append(current_span)
+    
+    return mutation_spans
 
 def extract_mutation_spans(tokens, offset_mapping, predictions, id2label, original_text):
     """
