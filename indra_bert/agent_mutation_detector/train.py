@@ -249,14 +249,9 @@ def main():
         print("Preprocessing data...")
         all_examples, label2id, id2label = preprocess_for_training(
             args.dataset_path, tokenizer, max_length=512, pubtator3_format=args.pubtator3_format,
-            max_negative_examples_per_agent=args.max_negative_examples_per_agent
+            max_negative_examples_per_agent=args.max_negative_examples_per_agent,
+            max_total_examples=args.max_total_examples
         )
-        
-        # Sample examples if max_total_examples is specified
-        if args.max_total_examples is not None and len(all_examples) > args.max_total_examples:
-            print(f"Sampling {args.max_total_examples} examples from {len(all_examples)} total examples")
-            random.shuffle(all_examples)
-            all_examples = all_examples[:args.max_total_examples]
         
         # Shuffle examples for random split
         random.shuffle(all_examples)

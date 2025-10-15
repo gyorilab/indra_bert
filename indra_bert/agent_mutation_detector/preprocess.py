@@ -332,7 +332,7 @@ def tokenize_examples(examples, tokenizer, label2id, max_length=512):
     return tokenized_examples
 
 # ---- Main preprocessing function ----
-def preprocess_for_training(input_path, tokenizer, max_length=512, pubtator3_format=False, max_negative_examples_per_agent=1):
+def preprocess_for_training(input_path, tokenizer, max_length=512, pubtator3_format=False, max_negative_examples_per_agent=1, max_total_examples=None):
     """
     Main function to preprocess data for mutation detection training.
     
@@ -349,6 +349,13 @@ def preprocess_for_training(input_path, tokenizer, max_length=512, pubtator3_for
     """
     # Load and preprocess data
     examples = load_and_preprocess_training_data(input_path, pubtator3_format=pubtator3_format, max_negative_examples_per_agent=max_negative_examples_per_agent)
+    
+    # Sample examples BEFORE tokenization if max_total_examples is specified
+    if max_total_examples is not None and len(examples) > max_total_examples:
+        print(f"Sampling {max_total_examples} examples from {len(examples)} total examples")
+        import random
+        random.shuffle(examples)
+        examples = examples[:max_total_examples]
     
     # Build label mappings
     label2id, id2label = build_label_mappings(examples)
