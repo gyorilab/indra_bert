@@ -235,6 +235,11 @@ def main():
             print(f"  Test: {len(test_dataset)} examples")
             print(f"  Labels: {len(label2id)} classes")
             
+            # Convert cached datasets to examples format for compatibility
+            train_examples = [train_dataset[i] for i in range(len(train_dataset))]
+            dev_examples = [dev_dataset[i] for i in range(len(dev_dataset))]
+            test_examples = [test_dataset[i] for i in range(len(test_dataset))]
+            
             # Skip preprocessing since we loaded from cache
             skip_preprocessing = True
             
@@ -246,10 +251,6 @@ def main():
         skip_preprocessing = False
     
     if not skip_preprocessing:
-        # Load tokenizer and add special tokens
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-        tokenizer.add_special_tokens({'additional_special_tokens': ['<e>', '</e>']})
-        
         # Preprocess data
         print("Preprocessing data...")
         all_examples, label2id, id2label = preprocess_for_training(
