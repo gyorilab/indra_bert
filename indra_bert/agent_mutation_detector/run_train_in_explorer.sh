@@ -3,8 +3,8 @@
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:v100-pcie:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --time=8:00:00
+#SBATCH --mem=64G
+#SBATCH --time=24:00:00
 #SBATCH --output=indra_bert_agent_mutation_detector_train_%j.out
 #SBATCH --error=indra_bert_agent_mutation_detector_train_%j.err
 
@@ -22,15 +22,12 @@ eval "$(conda shell.bash hook)"
 conda activate indra
 
 python -m indra_bert.agent_mutation_detector.train \
-    --dataset_path data/pubtator3/pubtator3_BioCXML_0_protein_variants.json \
+    --dataset_path data/pubtator3/pubtator3_BioCXML_0_protein_variants_sentence_level.json \
     --output_dir output/agent_mutation_detection \
     --model_name microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract \
     --epochs 10 \
     --version 2.0 \
     --pubtator3_format \
-    --max_negative_examples_per_agent 1 \
-    --max_total_examples 100000 \
-    --batch_size 16 \
-    --use_cached_dataset \
-    --resume_from_checkpoint latest
-
+    --max_negative_examples_per_agent 0 \
+    --batch_size 8 \
+    --max_total_examples 100000
