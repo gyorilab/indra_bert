@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from pathlib import Path
 from transformers import AutoModel, AutoConfig, PreTrainedModel, BertConfig
 from transformers.modeling_outputs import SequenceClassifierOutput
 from time import time
@@ -45,6 +46,7 @@ class TwoGatedClassifier(PreTrainedModel):
         model = cls(config)
         model.bert = AutoModel.from_pretrained(pretrained_model_name, config=config)
         return model
+    
 
     def forward(self, 
                 input_ids, 

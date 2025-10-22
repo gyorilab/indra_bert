@@ -176,6 +176,9 @@ def preprocess_negative_examples_for_model(batch, tokenizer):
 
 # ---- Tokenize for inference ----
 def preprocess_for_inference(text, tokenizer):
+    # Normalize entity tags first (same as training)
+    text = normalize_entity_tags(text)
+    # Then remove entity text but keep tags
     text_entities_removed = re.sub(ENTITY_TAG_PATTERN, "<e></e>", text)
     enc = tokenizer(
         text_entities_removed,
@@ -188,7 +191,10 @@ def preprocess_for_inference(text, tokenizer):
     return enc
 
 def preprocess_for_inference_batch(texts: list[str], tokenizer, max_length=512):
-    texts_entities_removed = [re.sub(ENTITY_TAG_PATTERN, "<e></e>", text) for text in texts]
+    # Normalize entity tags first (same as training)
+    texts_normalized = [normalize_entity_tags(text) for text in texts]
+    # Then remove entity text but keep tags
+    texts_entities_removed = [re.sub(ENTITY_TAG_PATTERN, "<e></e>", text) for text in texts_normalized]
     enc = tokenizer(
         texts_entities_removed,
         padding="longest",

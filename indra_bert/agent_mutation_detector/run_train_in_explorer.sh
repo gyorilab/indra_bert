@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:v100-pcie:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+#SBATCH --time=8:00:00
 #SBATCH --output=indra_bert_agent_mutation_detector_train_%j.out
 #SBATCH --error=indra_bert_agent_mutation_detector_train_%j.err
 
@@ -29,5 +29,7 @@ python -m indra_bert.agent_mutation_detector.train \
     --version 2.0 \
     --pubtator3_format \
     --max_negative_examples_per_agent 0 \
-    --batch_size 8 \
-    --max_total_examples 100000
+    --batch_size 16 \
+    --max_total_examples 100000 \
+    --resume_from_checkpoint latest \
+    --use_cached_dataset
