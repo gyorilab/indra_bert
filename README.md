@@ -226,7 +226,7 @@ Contributions are welcome! Please feel free to submit issues, feature requests, 
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the BSD-2 License - see the [LICENSE](LICENSE) file for details.
 
 ## Citation
 
@@ -236,8 +236,8 @@ If you use INDRA BERT in your research, please cite:
 @software{indra_bert,
   title={INDRA BERT: Statement Extraction using Fine-tuned BERT Models},
   author={Lim, Thomas and Gyori, Benjamin M.},
-  year={2024},
-  url={https://github.com/sorgerlab/indra_bert}
+  year={2025},
+  url={https://github.com/gyorilab/indra_bert}
 }
 ```
 
