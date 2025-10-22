@@ -1,0 +1,440 @@
+from datetime import datetime
+import argparse
+from pathlib import Path
+import random
+import json
+
+import numpy as np
+import torch
+from datasets import Dataset, load_from_disk, DatasetDict
+from transformers import (AutoTokenizer, AutoModelForTokenClassification, 
+                          AutoConfig, Trainer, TrainingArguments)
+from functools import partial
+from transformers import EvalPrediction
+from transformers import DataCollatorForTokenClassification
+from typing import Any, Dict, List
+
+from .preprocess import (
+    preprocess_for_training
+)
+
+# ---- Data Collator ----
+class DataCollatorWithDebug(DataCollatorForTokenClassification):
+    def __init__(self, tokenizer, id2label, max_examples_to_print=1, **kwargs):
+        super().__init__(tokenizer, **kwargs)
+        self.tokenizer = tokenizer
+        self.id2label = id2label
+        self.counter = 0
+        self.max_examples_to_print = max_examples_to_print
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        batch = super().__call__(features)
+
+        if self.counter < self.max_examples_to_print:
+            for i in range(min(len(features), self.max_examples_to_print - self.counter)):
+                input_ids = batch["input_ids"][i]
+                labels = batch["labels"][i]
+                attention_mask = batch["attention_mask"][i]
+
+                tokens = self.tokenizer.convert_ids_to_tokens(input_ids)
+                label_names = [self.id2label.get(l.item(), "IGN") if l.item() != -100 else "PAD" for l in labels]
+
+                print("\n--- DEBUG: Mutation Training Example ---")
+                print("-" * 50)
+                for j, tok in enumerate(tokens):
+                    attn = attention_mask[j].item()
+                    label = label_names[j]
+                    print(f"{tok:15} {label:12} {attn:<9}")
+                print("-" * 50)
+
+            self.counter += len(features)
+
+        return batch
+
+# ---- Metrics ----
+def compute_metrics_span_level(eval_preds: EvalPrediction, inputs, id2label, texts):
+    """
+    Compute span-level metrics for mutation detection using actual character spans.
+    """
+    predictions = eval_preds.predictions
+    labels = eval_preds.label_ids
+
+    TP, FP, FN = 0, 0, 0
+
+    for i in range(len(predictions)):
+        pred_ids = np.argmax(predictions[i], axis=1).tolist()
+        gold_ids = labels[i].tolist()
+
+        # Get the original mutation spans from training data
+        original_mutations = inputs[i]["mutations"]
+        text = texts[i]
+        
+        # Extract predicted mutation spans using actual token offsets
+        pred_spans = extract_mutation_spans_from_predictions(
+            inputs[i]["tokens"], pred_ids, id2label, text, inputs[i].get("offset_mapping")
+        )
+        
+        # Use original mutation spans as gold standard
+        gold_spans = original_mutations
+
+        # Compare spans using character positions
+        pred_set = {(s["start"], s["end"]) for s in pred_spans}
+        gold_set = {(s["start"], s["end"]) for s in gold_spans}
+
+        TP += len(pred_set & gold_set)
+        FP += len(pred_set - gold_set)
+        FN += len(gold_set - pred_set)
+
+    precision = TP / (TP + FP + 1e-8)
+    recall = TP / (TP + FN + 1e-8)
+    f1 = 2 * precision * recall / (precision + recall + 1e-8)
+
+    return {"precision": precision, "recall": recall, "f1": f1}
+
+def extract_mutation_spans_from_predictions(tokens, predictions, id2label, original_text, offset_mapping=None):
+    """
+    Extract mutation spans from token-level predictions using actual character offsets.
+    """
+    mutation_spans = []
+    current_span = None
+    
+    for i, (token, pred_id) in enumerate(zip(tokens, predictions)):
+        if offset_mapping and i < len(offset_mapping):
+            offset = offset_mapping[i]
+        else:
+            # Fallback: create approximate offsets
+            offset = (0, len(token))
+            
+        if offset[0] == offset[1]:  # Skip special tokens
+            continue
+            
+        label = id2label.get(pred_id, "O")
+        
+        if label == "B-mutation":
+            # Start new mutation span
+            if current_span:
+                mutation_spans.append(current_span)
+            current_span = {
+                "start": offset[0],
+                "end": offset[1],
+                "text": original_text[offset[0]:offset[1]]
+            }
+        elif label == "I-mutation" and current_span:
+            # Continue current mutation span
+            current_span["end"] = offset[1]
+            current_span["text"] = original_text[current_span["start"]:offset[1]]
+        else:
+            # End current span if exists
+            if current_span:
+                mutation_spans.append(current_span)
+                current_span = None
+    
+    # Add final span if exists
+    if current_span:
+        mutation_spans.append(current_span)
+    
+    return mutation_spans
+
+def extract_mutation_spans(tokens, offset_mapping, predictions, id2label, original_text):
+    """
+    Extract mutation spans from token-level predictions.
+    """
+    mutation_spans = []
+    current_span = None
+    
+    for i, (token, offset, pred_id) in enumerate(zip(tokens, offset_mapping, predictions)):
+        if offset[0] == offset[1]:  # Skip special tokens
+            continue
+            
+        label = id2label.get(pred_id, "O")
+        
+        if label == "B-mutation":
+            # Start new mutation span
+            if current_span:
+                mutation_spans.append(current_span)
+            current_span = {
+                "start": offset[0],
+                "end": offset[1],
+                "text": original_text[offset[0]:offset[1]]
+            }
+        elif label == "I-mutation" and current_span:
+            # Continue current mutation span
+            current_span["end"] = offset[1]
+            current_span["text"] = original_text[current_span["start"]:offset[1]]
+        else:
+            # End current span if exists
+            if current_span:
+                mutation_spans.append(current_span)
+                current_span = None
+    
+    # Add final span if exists
+    if current_span:
+        mutation_spans.append(current_span)
+    
+    return mutation_spans
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train Agent Mutation Detector")
+    parser.add_argument("--dataset_path", type=str, required=True, help="Path to dataset JSONL (INDRA) or JSON (PubTator3)")
+    parser.add_argument("--output_dir", type=str, required=True, help="Output directory for model")
+    parser.add_argument("--model_name", type=str, default="microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract", help="Base model name")
+    parser.add_argument("--epochs", type=int, default=8, help="Number of training epochs")
+    parser.add_argument("--version", type=str, default="1.0", help="Model version")
+    parser.add_argument("--use_cached_dataset", action="store_true", help="Use cached dataset if available")
+    parser.add_argument("--pubtator3_format", action="store_true", help="Input is PubTator3 JSON array format instead of INDRA JSONL")
+    parser.add_argument("--train_ratio", type=float, default=0.8, help="Ratio of training data (default: 0.8)")
+    parser.add_argument("--dev_ratio", type=float, default=0.1, help="Ratio of dev data (default: 0.1)")
+    parser.add_argument("--test_ratio", type=float, default=0.1, help="Ratio of test data (default: 0.1)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--max_negative_examples_per_agent", type=int, default=1, help="Maximum negative examples per agent (default: 1)")
+    parser.add_argument("--max_total_examples", type=int, default=None, help="Maximum total training examples (default: None, use all)")
+    parser.add_argument("--batch_size", type=int, default=8, help="Training batch size (default: 8)")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint directory to resume from, or 'latest' to auto-detect (default: None)")
+    
+    return parser.parse_args()
+
+def main():
+    print("Starting training script...")
+    args = parse_args()
+    print(f"Arguments parsed successfully. Output dir: {args.output_dir}")
+    
+    # Validate split ratios
+    total_ratio = args.train_ratio + args.dev_ratio + args.test_ratio
+    if abs(total_ratio - 1.0) > 1e-6:
+        raise ValueError(f"Train/dev/test ratios must sum to 1.0, got {total_ratio}")
+    
+    # Set random seed for reproducibility
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    
+    # Load tokenizer and add special tokens (always needed)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer.add_special_tokens({'additional_special_tokens': ['<e>', '</e>']})
+    
+    # Check for cached dataset
+    cache_dir = Path(args.output_dir) / "cached_dataset"
+    print(f"Checking for cached dataset at: {cache_dir}")
+    print(f"Cache exists: {cache_dir.exists()}")
+    print(f"Use cached dataset: {args.use_cached_dataset}")
+    
+    if args.use_cached_dataset and cache_dir.exists():
+        print(f"Loading cached dataset from {cache_dir}")
+        try:
+            dataset_dict = DatasetDict.load_from_disk(str(cache_dir))
+            train_dataset = dataset_dict['train']
+            dev_dataset = dataset_dict['validation'] 
+            test_dataset = dataset_dict['test']
+            
+            # Load label mappings from cache
+            label2id_path = cache_dir / "label2id.json"
+            if label2id_path.exists():
+                with open(label2id_path, 'r') as f:
+                    label2id = json.load(f)
+                id2label = {v: k for k, v in label2id.items()}
+            else:
+                raise FileNotFoundError("label2id.json not found in cache")
+                
+            print(f"Successfully loaded cached dataset:")
+            print(f"  Train: {len(train_dataset)} examples")
+            print(f"  Dev: {len(dev_dataset)} examples") 
+            print(f"  Test: {len(test_dataset)} examples")
+            print(f"  Labels: {len(label2id)} classes")
+            
+            # Convert cached datasets to examples format efficiently
+            print("Converting cached datasets to examples format...")
+            train_examples = train_dataset.to_list()
+            dev_examples = dev_dataset.to_list()
+            test_examples = test_dataset.to_list()
+            print(f"Conversion completed: {len(train_examples)} train, {len(dev_examples)} dev, {len(test_examples)} test")
+            
+            # Skip preprocessing since we loaded from cache
+            skip_preprocessing = True
+            
+        except Exception as e:
+            print(f"Warning: Failed to load cached dataset: {e}")
+            print("Falling back to preprocessing from scratch...")
+            skip_preprocessing = False
+    else:
+        print("Cache not found or not using cached dataset - will preprocess from scratch")
+        skip_preprocessing = False
+    
+    if not skip_preprocessing:
+        # Preprocess data
+        print("Preprocessing data...")
+        all_examples, label2id, id2label = preprocess_for_training(
+            args.dataset_path, tokenizer, max_length=512, pubtator3_format=args.pubtator3_format,
+            max_negative_examples_per_agent=args.max_negative_examples_per_agent,
+            max_total_examples=args.max_total_examples
+        )
+        
+        # Shuffle examples for random split
+        random.shuffle(all_examples)
+        
+        # Split into train/dev/test
+        n_total = len(all_examples)
+        n_train = int(args.train_ratio * n_total)
+        n_dev = int(args.dev_ratio * n_total)
+        
+        train_examples = all_examples[:n_train]
+        dev_examples = all_examples[n_train:n_train + n_dev]
+        test_examples = all_examples[n_train + n_dev:]
+        
+        print(f"Total examples: {n_total}")
+        print(f"Training examples: {len(train_examples)} ({args.train_ratio*100:.1f}%)")
+        print(f"Dev examples: {len(dev_examples)} ({args.dev_ratio*100:.1f}%)")
+        print(f"Test examples: {len(test_examples)} ({args.test_ratio*100:.1f}%)")
+        print(f"Labels: {label2id}")
+        
+        # Create datasets
+        train_dataset = Dataset.from_list(train_examples)
+        dev_dataset = Dataset.from_list(dev_examples)
+        test_dataset = Dataset.from_list(test_examples)
+        
+        # Save dataset splits and label mappings to cache
+        dataset_dict = DatasetDict({
+            'train': train_dataset,
+            'validation': dev_dataset,
+            'test': test_dataset
+        })
+        cache_dir = Path(args.output_dir) / "cached_dataset"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        dataset_dict.save_to_disk(cache_dir)
+        
+        # Save label mappings
+        with open(cache_dir / "label2id.json", 'w') as f:
+            json.dump(label2id, f, indent=2)
+        
+        print(f"Cached dataset splits and label mappings saved to {cache_dir}")
+    
+    # Create model config
+    config = AutoConfig.from_pretrained(
+        args.model_name,
+        num_labels=len(label2id),
+        id2label=id2label,
+        label2id=label2id
+    )
+    
+    # Load model
+    model = AutoModelForTokenClassification.from_pretrained(
+        args.model_name,
+        config=config
+    )
+    
+    # Resize token embeddings to match tokenizer size
+    if model.get_input_embeddings().num_embeddings != len(tokenizer):
+        print("Resizing token embeddings to match tokenizer size...")
+        print("Old embedding size:", model.get_input_embeddings().num_embeddings)
+        print("New embedding size:", len(tokenizer))
+        model.resize_token_embeddings(len(tokenizer))
+    
+    # Create data collator
+    data_collator = DataCollatorWithDebug(
+        tokenizer=tokenizer,
+        id2label=id2label,
+        max_examples_to_print=2
+    )
+    
+    # Create training arguments
+    training_args = TrainingArguments(
+        output_dir=args.output_dir,
+        eval_strategy="steps",
+        eval_steps=200,
+        save_strategy="steps",
+        save_steps=200,
+        logging_strategy="steps",
+        logging_steps=50,
+        learning_rate=2e-5,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
+        num_train_epochs=args.epochs,
+        weight_decay=0.01,
+        save_total_limit=2,  # Keep best model + latest checkpoint
+        load_best_model_at_end=True,  # Load best model at end
+        metric_for_best_model="eval_f1",  # Use F1 score to determine best model
+        greater_is_better=True,  # Higher F1 is better
+        logging_dir='./logs',
+        report_to=None,  # Disable wandb/tensorboard
+    )
+    
+    # Create trainer
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=dev_dataset,
+        data_collator=data_collator,
+        compute_metrics=partial(
+            compute_metrics_span_level,
+            inputs=dev_examples,
+            id2label=id2label,
+            texts=[ex["text"] for ex in dev_examples]
+        ),
+    )
+    
+    # Train model
+    print("Starting training...")
+    if args.resume_from_checkpoint:
+        checkpoint_path = args.resume_from_checkpoint
+        
+        # Auto-detect latest checkpoint if 'latest' is specified
+        if checkpoint_path == "latest":
+            output_dir = Path(args.output_dir)
+            checkpoint_dirs = [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")]
+            if checkpoint_dirs:
+                # Sort by step number and get the latest
+                latest_checkpoint = max(checkpoint_dirs, key=lambda x: int(x.name.split("-")[1]))
+                checkpoint_path = str(latest_checkpoint)
+                print(f"Auto-detected latest checkpoint: {checkpoint_path}")
+            else:
+                print("No checkpoints found, starting from scratch")
+                checkpoint_path = None
+        
+        if checkpoint_path:
+            print(f"Resuming from checkpoint: {checkpoint_path}")
+            trainer.train(resume_from_checkpoint=checkpoint_path)
+        else:
+            trainer.train()
+    else:
+        trainer.train()
+    
+    # Save final model
+    trainer.save_model()
+    tokenizer.save_pretrained(args.output_dir)
+    
+    # Save label mappings
+    with open(f"{args.output_dir}/label2id.json", "w") as f:
+        json.dump(label2id, f)
+    with open(f"{args.output_dir}/id2label.json", "w") as f:
+        json.dump(id2label, f)
+    
+    print(f"Training completed! Model saved to {args.output_dir}")
+    
+    # Evaluate on test set
+    print("\nEvaluating on test set...")
+    test_trainer = Trainer(
+        model=model,
+        args=training_args,
+        data_collator=data_collator,
+        compute_metrics=partial(
+            compute_metrics_span_level,
+            inputs=test_examples,
+            id2label=id2label,
+            texts=[ex["text"] for ex in test_examples]
+        ),
+    )
+    
+    test_results = test_trainer.evaluate(test_dataset)
+    print(f"\nTest Results:")
+    print(f"  Precision: {test_results['eval_precision']:.4f}")
+    print(f"  Recall: {test_results['eval_recall']:.4f}")
+    print(f"  F1: {test_results['eval_f1']:.4f}")
+    
+    # Save test results
+    with open(f"{args.output_dir}/test_results.json", "w") as f:
+        json.dump(test_results, f, indent=2)
+    
+    print(f"\nTest results saved to {args.output_dir}/test_results.json")
+
+if __name__ == "__main__":
+    main()

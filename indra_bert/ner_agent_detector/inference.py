@@ -3,7 +3,7 @@ import torch
 from .preprocess import preprocess_for_inference
 from .postprocess import extract_spans_from_encoding
 
-class AgentNERModel:
+class AgentNERExtractor:
     def __init__(self, model_path: str):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.model = AutoModelForTokenClassification.from_pretrained(model_path)
