@@ -19,6 +19,9 @@ class IndraAgentsTagger:
         model_dir = Path(model_dir)
         self.tokenizer = SpecialTokenOffsetFixTokenizer(AutoTokenizer.from_pretrained(model_dir))
         self.model = AutoModelForTokenClassification.from_pretrained(model_dir)
+        # Device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
         self.model.eval()
         self.id2label = self.model.config.id2label
 
@@ -34,8 +37,8 @@ class IndraAgentsTagger:
         enc = preprocess_for_inference(stmt_type, entity_annotated_text, self.tokenizer)
         # for tok, offset in zip(enc['tokens'], enc['offsets']):
         #     print(f"{tok}: {offset}")
-        input_ids = enc["input_ids"]
-        attention_mask = enc["attention_mask"]
+        input_ids = enc["input_ids"].to(self.device)
+        attention_mask = enc["attention_mask"].to(self.device)
         
         tokens = enc["tokens"]
         offsets = enc["offsets"]
@@ -44,8 +47,8 @@ class IndraAgentsTagger:
         with torch.no_grad():
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
             probs = F.softmax(outputs.logits, dim=-1)
-            predictions = torch.argmax(probs, dim=2)[0]
-            confidence_scores = torch.max(probs, dim=2).values[0]
+            predictions = torch.argmax(probs, dim=2)[0].detach().cpu()
+            confidence_scores = torch.max(probs, dim=2).values[0].detach().cpu()
 
         pred_labels = [self.id2label[p.item()] if offsets[i] is not None and offsets[i] != (None, None) else "O"
                         for i, p in enumerate(predictions)]
@@ -186,8 +189,8 @@ class IndraAgentsTagger:
         if enc["input_ids"].shape[0] == 0:
             return []
     
-        input_ids = enc["input_ids"]
-        attention_mask = enc["attention_mask"]
+        input_ids = enc["input_ids"].to(self.device)
+        attention_mask = enc["attention_mask"].to(self.device)
         tokens_batch = enc["tokens"]
         offsets_batch = enc["offsets"]
         seq_ids_batch = enc["sequence_ids"]
@@ -195,8 +198,8 @@ class IndraAgentsTagger:
         with torch.no_grad():
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
             probs = F.softmax(outputs.logits, dim=-1)
-            predictions = torch.argmax(probs, dim=2)
-            confidences = torch.max(probs, dim=2).values
+            predictions = torch.argmax(probs, dim=2).detach().cpu()
+            confidences = torch.max(probs, dim=2).values.detach().cpu()
 
         batch_results = []
 

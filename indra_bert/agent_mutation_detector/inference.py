@@ -11,7 +11,10 @@ class AgentMutationDetector:
         self.model = AutoModelForTokenClassification.from_pretrained(model_path)
         self.label2id = self.model.config.label2id
         self.id2label = self.model.config.id2label
-        
+
+        # Device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
         self.model.eval()
 
     def predict(self, agents: List[Dict], annotated_text: str) -> Dict[str, Any]:
@@ -107,17 +110,17 @@ class AgentMutationDetector:
         )
         
         model_inputs = {
-            "input_ids": encoding["input_ids"],
-            "attention_mask": encoding["attention_mask"],
+            "input_ids": encoding["input_ids"].to(self.device),
+            "attention_mask": encoding["attention_mask"].to(self.device),
         }
         
         with torch.no_grad():
             outputs = self.model(**model_inputs)
         
         logits = outputs.logits
-        predictions = torch.argmax(logits, dim=2).squeeze(0).tolist()
-        tokens = self.tokenizer.convert_ids_to_tokens(encoding["input_ids"].squeeze(0))
-        offset_mapping = encoding["offset_mapping"].squeeze(0)
+        predictions = torch.argmax(logits, dim=2).squeeze(0).detach().cpu().tolist()
+        tokens = self.tokenizer.convert_ids_to_tokens(encoding["input_ids"].squeeze(0).detach().cpu())
+        offset_mapping = encoding["offset_mapping"].squeeze(0).tolist()
         
         # Extract mutation spans from predictions
         mutation_spans = self._extract_mutation_spans(tokens, offset_mapping, predictions, text)

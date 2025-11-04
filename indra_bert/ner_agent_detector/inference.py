@@ -10,22 +10,25 @@ class AgentNERExtractor:
         self.label2id = self.model.config.label2id
         self.id2label = self.model.config.id2label
 
+        # Device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
         self.model.eval()
 
     def predict_raw(self, text: str):
         encoding = preprocess_for_inference(text, self.tokenizer)
 
         model_inputs = {
-            "input_ids": encoding["input_ids"],
-            "attention_mask": encoding["attention_mask"],
+            "input_ids": encoding["input_ids"].to(self.device),
+            "attention_mask": encoding["attention_mask"].to(self.device),
         }
         
         with torch.no_grad():
             outputs = self.model(**model_inputs)
 
         logits = outputs.logits
-        predictions = torch.argmax(logits, dim=2).squeeze(0).tolist()
-        tokens = self.tokenizer.convert_ids_to_tokens(encoding["input_ids"].squeeze(0))
+        predictions = torch.argmax(logits, dim=2).squeeze(0).detach().cpu().tolist()
+        tokens = self.tokenizer.convert_ids_to_tokens(encoding["input_ids"].squeeze(0).detach().cpu())
         offset_mapping = encoding["offset_mapping"]
 
         return tokens, offset_mapping, predictions
@@ -61,18 +64,18 @@ class AgentNERExtractor:
             return_tensors="pt"
         )
 
-        input_ids = encodings["input_ids"]
-        attention_mask = encodings["attention_mask"]
+        input_ids = encodings["input_ids"].to(self.device)
+        attention_mask = encodings["attention_mask"].to(self.device)
         offset_mappings = encodings["offset_mapping"]  # shape: (batch_size, seq_len, 2)
 
         with torch.no_grad():
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
             logits = outputs.logits  # shape: (batch_size, seq_len, num_labels)
-            predictions = torch.argmax(logits, dim=2)  # shape: (batch_size, seq_len)
+            predictions = torch.argmax(logits, dim=2).detach().cpu()  # shape: (batch_size, seq_len)
 
         results = []
         for i in range(len(texts)):
-            token_ids = input_ids[i]
+            token_ids = input_ids[i].detach().cpu()
             tokens = self.tokenizer.convert_ids_to_tokens(token_ids)
             preds = predictions[i].tolist()
             offsets = offset_mappings[i].tolist()
