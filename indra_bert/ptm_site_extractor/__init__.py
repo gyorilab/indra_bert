@@ -11,7 +11,7 @@ The module includes:
 """
 
 from .inference import PTMSiteExtractor
-from .preprocess import preprocess_ptm_data
-from .train import train_ptm_model
+from .preprocess import preprocess_for_training
+from .train import main as train_ptm_model
 
-__all__ = ['PTMSiteExtractor', 'preprocess_ptm_data', 'train_ptm_model']
+__all__ = ['PTMSiteExtractor', 'preprocess_for_training', 'train_ptm_model']

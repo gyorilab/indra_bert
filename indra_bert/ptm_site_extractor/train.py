@@ -39,7 +39,7 @@ class DataCollatorWithDebug(DataCollatorForTokenClassification):
                 tokens = self.tokenizer.convert_ids_to_tokens(input_ids)
                 label_names = [self.id2label.get(l.item(), "IGN") if l.item() != -100 else "PAD" for l in labels]
 
-                print("\n--- DEBUG: Mutation Training Example ---")
+                print("\n--- DEBUG: PTM Site Training Example ---")
                 print("-" * 50)
                 for j, tok in enumerate(tokens):
                     attn = attention_mask[j].item()
@@ -54,7 +54,7 @@ class DataCollatorWithDebug(DataCollatorForTokenClassification):
 # ---- Metrics ----
 def compute_metrics_span_level(eval_preds: EvalPrediction, inputs, id2label, texts):
     """
-    Compute span-level metrics for mutation detection using actual character spans.
+    Compute span-level metrics for PTM site detection using actual character spans.
     """
     predictions = eval_preds.predictions
     labels = eval_preds.label_ids
@@ -65,17 +65,17 @@ def compute_metrics_span_level(eval_preds: EvalPrediction, inputs, id2label, tex
         pred_ids = np.argmax(predictions[i], axis=1).tolist()
         gold_ids = labels[i].tolist()
 
-        # Get the original mutation spans from training data
-        original_mutations = inputs[i]["mutations"]
+        # Get the original PTM site spans from training data
+        original_sites = inputs[i]["sites"]
         text = texts[i]
         
-        # Extract predicted mutation spans using actual token offsets
-        pred_spans = extract_mutation_spans_from_predictions(
+        # Extract predicted PTM site spans using actual token offsets
+        pred_spans = extract_site_spans_from_predictions(
             inputs[i]["tokens"], pred_ids, id2label, text, inputs[i].get("offset_mapping")
         )
         
-        # Use original mutation spans as gold standard
-        gold_spans = original_mutations
+        # Use original site spans as gold standard
+        gold_spans = original_sites
 
         # Compare spans using character positions
         pred_set = {(s["start"], s["end"]) for s in pred_spans}
@@ -91,64 +91,60 @@ def compute_metrics_span_level(eval_preds: EvalPrediction, inputs, id2label, tex
 
     return {"precision": precision, "recall": recall, "f1": f1}
 
-def extract_mutation_spans_from_predictions(tokens, predictions, id2label, original_text, offset_mapping=None):
+def extract_site_spans_from_predictions(tokens, predictions, id2label, original_text, offset_mapping):
     """
-    Extract mutation spans from token-level predictions using actual character offsets.
+    Extract PTM site spans from token-level predictions using actual character offsets.
     """
-    mutation_spans = []
+    site_spans = []
     current_span = None
     
     for i, (token, pred_id) in enumerate(zip(tokens, predictions)):
-        if offset_mapping and i < len(offset_mapping):
-            offset = offset_mapping[i]
-        else:
-            # Fallback: create approximate offsets
-            offset = (0, len(token))
+        if i >= len(offset_mapping):
+            continue
+        offset = offset_mapping[i]
             
         if offset[0] == offset[1]:  # Skip special tokens
             continue
             
         label = id2label.get(pred_id, "O")
         
-        if label == "B-mutation":
-            # Start new mutation span
+        if label == "B-site":
+            # Start new PTM site span
             if current_span:
-                mutation_spans.append(current_span)
+                site_spans.append(current_span)
             current_span = {
                 "start": offset[0],
                 "end": offset[1],
                 "text": original_text[offset[0]:offset[1]]
             }
-        elif label == "I-mutation" and current_span:
-            # Continue current mutation span
+        elif label == "I-site" and current_span:
+            # Continue current PTM site span
             current_span["end"] = offset[1]
             current_span["text"] = original_text[current_span["start"]:offset[1]]
         else:
             # End current span if exists
             if current_span:
-                mutation_spans.append(current_span)
+                site_spans.append(current_span)
                 current_span = None
     
     # Add final span if exists
     if current_span:
-        mutation_spans.append(current_span)
+        site_spans.append(current_span)
     
-    return mutation_spans
+    return site_spans
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train Agent Mutation Detector")
-    parser.add_argument("--dataset_path", type=str, required=True, help="Path to dataset JSONL (INDRA) or JSON (PubTator3)")
+    parser = argparse.ArgumentParser(description="Train PTM Site Extractor")
+    parser.add_argument("--dataset_path", type=str, required=True, help="Path to dataset TSV")
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory for model")
     parser.add_argument("--model_name", type=str, default="microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract", help="Base model name")
     parser.add_argument("--epochs", type=int, default=8, help="Number of training epochs")
     parser.add_argument("--version", type=str, default="1.0", help="Model version")
     parser.add_argument("--use_cached_dataset", action="store_true", help="Use cached dataset if available")
-    parser.add_argument("--pubtator3_format", action="store_true", help="Input is PubTator3 JSON array format instead of INDRA JSONL")
     parser.add_argument("--train_ratio", type=float, default=0.8, help="Ratio of training data (default: 0.8)")
     parser.add_argument("--dev_ratio", type=float, default=0.1, help="Ratio of dev data (default: 0.1)")
     parser.add_argument("--test_ratio", type=float, default=0.1, help="Ratio of test data (default: 0.1)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--max_negative_examples_per_agent", type=int, default=1, help="Maximum negative examples per agent (default: 1)")
     parser.add_argument("--max_total_examples", type=int, default=None, help="Maximum total training examples (default: None, use all)")
     parser.add_argument("--batch_size", type=int, default=8, help="Training batch size (default: 8)")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint directory to resume from, or 'latest' to auto-detect (default: None)")
@@ -225,8 +221,9 @@ def main():
         # Preprocess data
         print("Preprocessing data...")
         all_examples, label2id, id2label = preprocess_for_training(
-            args.dataset_path, tokenizer, max_length=512, pubtator3_format=args.pubtator3_format,
-            max_negative_examples_per_agent=args.max_negative_examples_per_agent,
+            args.dataset_path, tokenizer, max_length=512, 
+            tsv_format=True,
+            max_negative_examples_per_agent=0,  # No negative examples
             max_total_examples=args.max_total_examples
         )
         
@@ -400,3 +397,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
