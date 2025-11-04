@@ -50,21 +50,68 @@ class AgentMutationDetector:
         }
 
     def predict_batch(self, pairs: List[List[Dict]], annotated_texts: List[str]) -> List[Dict[str, Any]]:
+        """Predict mutations for multiple pairs using a single batched forward pass.
+
+        We preserve per-agent detection by creating per-agent modified texts,
+        running them as a single batch, and regrouping outputs per original item.
         """
-        Predict mutations for multiple pairs in batch.
-        
-        Args:
-            pairs: List of agent pairs
-            annotated_texts: List of annotated texts corresponding to each pair
-            
-        Returns:
-            List of mutation prediction results
-        """
-        results = []
-        for pair, annotated_text in zip(pairs, annotated_texts):
-            result = self.predict(pair, annotated_text)
-            results.append(result)
-        return results
+        assert len(pairs) == len(annotated_texts)
+
+        # 1) Build per-agent modified texts and an index map back to (item_idx, agent_key)
+        modified_texts: List[str] = []
+        backrefs: List[Tuple[int, Tuple[int, int, str]]] = []
+
+        for i, (pair_agents, text) in enumerate(zip(pairs, annotated_texts)):
+            for agent in pair_agents:
+                modified = self._create_single_agent_text(text, agent)
+                modified_texts.append(modified)
+                backrefs.append((i, (agent["start"], agent["end"], agent["text"])) )
+
+        if not modified_texts:
+            return [
+                {"mutations": {}, "agents": p, "annotated_text": t}
+                for p, t in zip(pairs, annotated_texts)
+            ]
+
+        # 2) Tokenize batch
+        enc = self.tokenizer(
+            modified_texts,
+            padding=True,
+            truncation=True,
+            return_offsets_mapping=True,
+            max_length=512,
+            return_tensors="pt",
+        )
+
+        input_ids = enc["input_ids"].to(self.device)
+        attention_mask = enc["attention_mask"].to(self.device)
+        offset_mappings = enc["offset_mapping"]  # keep on CPU for indexing
+
+        # 3) Forward pass once
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+            pred_ids = torch.argmax(logits, dim=2).detach().cpu()
+
+        # 4) Regroup per original item
+        grouped_results: List[Dict[str, Any]] = [
+            {"mutations": {}, "agents": pairs[i], "annotated_text": annotated_texts[i]}
+            for i in range(len(pairs))
+        ]
+
+        for idx in range(len(modified_texts)):
+            item_idx, agent_key = backrefs[idx]
+
+            tokens = self.tokenizer.convert_ids_to_tokens(input_ids[idx].detach().cpu())
+            offsets = offset_mappings[idx].tolist()
+            predictions = pred_ids[idx].tolist()
+
+            spans = self._extract_mutation_spans(tokens, offsets, predictions, modified_texts[idx])
+            if spans:
+                muts = self._spans_to_mutations(spans, modified_texts[idx])
+                grouped_results[item_idx]["mutations"][agent_key] = muts
+
+        return grouped_results
 
     def _create_single_agent_text(self, annotated_text: str, target_agent: Dict) -> str:
         """
