@@ -375,6 +375,7 @@ def main():
         model=model,
         args=training_args,
         data_collator=data_collator,
+        eval_dataset=test_dataset,
         compute_metrics=partial(
             compute_metrics_span_level,
             inputs=test_examples,

@@ -17,15 +17,21 @@ from .utils.parse_mutation import convert_to_indra_mutations
 import logging
 logger = logging.getLogger(__name__)
 
-# PTM statement types that require PTM site extraction
+# PTM statement types that require PTM site extraction (from indra_schema.json Modification.pattern)
 PTM_STMT_TYPES = {
-    "Phosphorylation", "Dephosphorylation", 
-    "Acetylation", "Deacetylation",
-    "Methylation", "Demethylation",
+    "Phosphorylation", "Dephosphorylation",
+    "Autophosphorylation", "Transphosphorylation",
     "Ubiquitination", "Deubiquitination",
     "Sumoylation", "Desumoylation",
     "Hydroxylation", "Dehydroxylation",
-    "Glycosylation", "Deglycosylation"
+    "Acetylation", "Deacetylation",
+    "Glycosylation", "Deglycosylation",
+    "Farnesylation", "Defarnesylation",
+    "Geranylgeranylation", "Degeranylgeranylation",
+    "Palmitoylation", "Depalmitoylation",
+    "Myristoylation", "Demyristoylation",
+    "Ribosylation", "Deribosylation",
+    "Methylation", "Demethylation"
 }
 
 
