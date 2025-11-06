@@ -41,7 +41,7 @@ class IndraStructuredExtractor:
                  stmt_model_path="thomaslim6793/indra_bert_indra_stmt_classifier", 
                  role_model_path="thomaslim6793/indra_bert_indra_stmt_agents_role_assigner",
                  mutations_model_path="thomaslim6793/indra_bert_agent_mutation_detection",
-                 ptm_site_model_path=None,
+                 ptm_site_model_path="thomaslim6793/indra_bert_ptm_site_extractor",
                  stmt_conf_threshold=0.95):
         self.ner_model = AgentNERExtractor(ner_model_path)
         self.stmt_model = IndraStmtClassifier(stmt_model_path)
