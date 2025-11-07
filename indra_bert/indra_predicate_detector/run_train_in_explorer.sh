@@ -19,7 +19,7 @@ export TOKENIZERS_PARALLELISM=true
 eval "$(conda shell.bash hook)"
 conda activate indra
 
-python -m indra_bert.indra_pred_detector.train \
+python -m indra_bert.indra_predicate_detector.train \
     --train-data data/train/srl_data/llm_annotated/llm_annotated_benchmark_stratified_filtered.jsonl \
     --output-dir output/predicate_detector \
     --model-name bert-base-uncased \
