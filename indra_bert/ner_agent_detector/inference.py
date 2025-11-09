@@ -35,11 +35,11 @@ class AgentNERExtractor:
 
     def predict(self, text: str):
         tokens, offset_mapping, predicted_label_ids = self.predict_raw(text)
-        entity_spans = extract_spans_from_encoding(tokens, offset_mapping, predicted_label_ids, self.id2label, text)
-        annotated_text = self._annotate_text(text, entity_spans)
+        entities = extract_spans_from_encoding(tokens, offset_mapping, predicted_label_ids, self.id2label, text)
+        annotated_text = self._annotate_text(text, entities)
         return {
             "text": text,
-            "entity_spans": entity_spans,
+            "entities": entities,
             "annotated_text": annotated_text
         }
 
@@ -50,7 +50,8 @@ class AgentNERExtractor:
             start = span["start"]
             end = span["end"]
             entity_text = span["text"]
-            text = text[:start] + f"<e>{entity_text}</e>" + text[end:]
+            entity_type = span.get("raw_type", span.get("type", "entity"))
+            text = text[:start] + f"<e type=\"{entity_type}\">{entity_text}</e>" + text[end:]
         return text
 
     def predict_batch(self, texts: list[str]):
@@ -80,7 +81,7 @@ class AgentNERExtractor:
             preds = predictions[i].tolist()
             offsets = offset_mappings[i].tolist()
 
-            entity_spans = extract_spans_from_encoding(
+            entities = extract_spans_from_encoding(
                 tokens=tokens,
                 offset_mapping=offsets,
                 predicted_label_ids=preds,
@@ -88,11 +89,11 @@ class AgentNERExtractor:
                 text=texts[i]
             )
 
-            annotated_text = self._annotate_text(texts[i], entity_spans)
+            annotated_text = self._annotate_text(texts[i], entities)
 
             results.append({
                 "text": texts[i],
-                "entity_spans": entity_spans,
+                "entities": entities,
                 "annotated_text": annotated_text
             })
 

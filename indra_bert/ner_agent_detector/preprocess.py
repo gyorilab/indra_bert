@@ -1,20 +1,26 @@
 import json
 
+# ---- Helpers ----
+def normalize_entity_type(raw_type: str) -> str:
+    return raw_type.replace(" ", "_").replace("-", "_")
+
 # ---- Assign BIO tags ----
 def char_to_token_labels(tokens, offset_mapping, entity_spans):
     labels = ["O"] * len(tokens)
     for span_dict in entity_spans:
         start_char = span_dict["start"]
         end_char = span_dict["end"]
+        ent_type = span_dict.get("type", "entity")
+        ent_type_norm = normalize_entity_type(ent_type)
         for i, (tok_start, tok_end) in enumerate(offset_mapping):
             if tok_start is None or tok_end is None:
                 continue
             if tok_end <= start_char or tok_start >= end_char:
                 continue
             if tok_start == start_char:
-                labels[i] = f"B-entity"
+                labels[i] = f"B-{ent_type_norm}"
             else:
-                labels[i] = f"I-entity"
+                labels[i] = f"I-{ent_type_norm}"
     return labels
 
 # ---- Load raw examples ----
@@ -29,11 +35,21 @@ def load_and_preprocess_from_raw_data(input_path):
         all_entity_spans = []
         for entity in raw_example["entities"]:
             entity_text = entity["text"]
+            raw_entity_type = entity.get("raw_type", entity.get("type", "entity"))
+            entity_type = normalize_entity_type(entity.get("type", raw_entity_type))
             same_entity_spans = [location for location in entity["locations"]]
             for location in same_entity_spans:
                 location["entity_text"] = entity_text
+                location["type"] = entity_type
+                location["raw_type"] = raw_entity_type
             same_entity_spans = [
-                {"start": span['start'], "end": span['end'], "text": span['entity_text']}
+                {
+                    "start": span['start'],
+                    "end": span['end'],
+                    "text": span['entity_text'],
+                    "type": span.get("type", entity_type),
+                    "raw_type": span.get("raw_type", raw_entity_type),
+                }
                 for span in same_entity_spans
             ]
             all_entity_spans.extend(same_entity_spans)

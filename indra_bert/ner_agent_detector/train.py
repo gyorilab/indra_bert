@@ -75,12 +75,12 @@ def compute_metrics_span_level(eval_preds: EvalPrediction, inputs, id2label, tex
         text = texts[i]
 
         pred_spans = {
-            (s["start"], s["end"], s["text"])
+            (s["start"], s["end"], s["text"], s.get("type"))
             for s in extract_spans_from_encoding(tokens, offsets, pred_ids, id2label, text)
         }
 
         gold_spans = {
-            (s["start"], s["end"], s["text"])
+            (s["start"], s["end"], s["text"], s.get("type"))
             for s in extract_spans_from_encoding(tokens, offsets, gold_ids, id2label, text)
         }
 
