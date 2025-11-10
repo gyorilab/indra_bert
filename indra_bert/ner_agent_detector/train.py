@@ -237,6 +237,11 @@ def main():
 
     print(f"Test evaluation results saved to {log_file}")
 
+    # ---- Save final model and tokenizer for inference ----
+    print("Saving final model and tokenizer...")
+    trainer.save_model(output_dir)
+    tokenizer.save_pretrained(output_dir)
+
 
 if __name__ == "__main__":
     main()
