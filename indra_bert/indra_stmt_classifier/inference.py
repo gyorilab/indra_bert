@@ -4,6 +4,7 @@ from typing import List, Optional
 
 import torch
 from transformers import AutoTokenizer, AutoConfig
+from huggingface_hub import snapshot_download
 
 from .model import MultiHeadStmtClassifier
 from .preprocess import (
@@ -14,8 +15,16 @@ from .preprocess import (
 
 class IndraStmtClassifier:
     def __init__(self, model_path: str | Path, device: Optional[torch.device] = None):
-        self.model_path = Path(model_path)
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+        candidate_path = Path(model_path)
+        if candidate_path.exists():
+            self.model_path = candidate_path.resolve()
+            pretrained_source = str(self.model_path)
+        else:
+            snapshot_path = snapshot_download(repo_id=str(model_path), repo_type="model")
+            self.model_path = Path(snapshot_path)
+            pretrained_source = snapshot_path
+
+        self.tokenizer = AutoTokenizer.from_pretrained(pretrained_source)
         if "<e>" not in self.tokenizer.get_vocab():
             self.tokenizer.add_special_tokens({"additional_special_tokens": ["<e>", "</e>"]})
 
@@ -36,9 +45,9 @@ class IndraStmtClassifier:
         self.id2relation_subtype = {v: k for k, v in self.relation_subtype2id.items()}
         self.id2indra_label = {v: k for k, v in self.indra_label2id.items()}
 
-        config = AutoConfig.from_pretrained(self.model_path)
+        config = AutoConfig.from_pretrained(pretrained_source)
         self.model = MultiHeadStmtClassifier.from_pretrained(
-            self.model_path,
+            pretrained_source,
             config=config,
             gate2_num_labels=len(self.relation_subtype2id),
             gate3_num_labels=len(self.indra_label2id),

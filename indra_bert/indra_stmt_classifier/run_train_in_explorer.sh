@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=indra_stmt_classifier
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:v100-pcie:1
+#SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --time=8:00:00
 #SBATCH --output=indra_stmt_classifier_%j.out
 #SBATCH --error=indra_stmt_classifier_%j.err
@@ -28,8 +28,8 @@ python -m indra_bert.indra_stmt_classifier.train \
     --indra_path data/train/indra_benchmark_annotated_data/indra_benchmark_corpus_annotated_stratified_sample_2000.jsonl \
     --output_dir output/indra_stmt_classifier \
     --epochs 10 \
-    --train_batch_size 16 \
-    --eval_batch_size 16 \
+    --train_batch_size 32 \
+    --eval_batch_size 32 \
     --learning_rate 3e-5 \
     --gate1_loss_weight 1.0 \
     --gate2_loss_weight 0.5 \
