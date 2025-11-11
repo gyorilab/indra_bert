@@ -35,6 +35,47 @@ PTM_STMT_TYPES = {
     "Methylation", "Demethylation"
 }
 
+GATE2_TO_INDRA_TYPE = {
+    # Association: generic, non-directional relatedness (BioRED / BC5CDR).
+    "Association": ["Association"],
+    # Bind: physical binding / complex formation between entities (ChemProt / BioRED).
+    "Bind": ["Complex"],
+    # Drug_Interaction: pharmacologic or biochemical interaction between drugs and proteins.
+    "Drug_Interaction": ["Complex", "Association"],
+    # Conversion: biochemical conversion / metabolic transformation (BioRED conversion label).
+    "Conversion": ["Conversion"],
+    # CID: chemical-induced disease relationship (BC5CDR).
+    "CID": ["IncreaseAmount", "Association"],
+    # Cotreatment: co-administration / combined treatment scenario (BioRED).
+    "Cotreatment": ["Association"],
+    # Comparison: comparative statement linking two entities (e.g., higher/lower) (BioRED).
+    "Comparison": ["Association"],
+    # CPR:1 – Part-of/component relation (ChemProt CPR1).
+    "CPR:1": ["Association", "Complex"],
+    # CPR:2 – Regulator (direction unspecified) (ChemProt CPR2); we bias toward increase-oriented INDRA types.
+    "CPR:2": ["Activation", "IncreaseAmount"],
+    # CPR:3 – Upregulator (increases activity/expression) (ChemProt CPR3).
+    "CPR:3": ["Activation", "IncreaseAmount"],
+    # CPR:4 – Downregulator (decreases activity/expression) (ChemProt CPR4).
+    "CPR:4": ["Inhibition", "DecreaseAmount"],
+    # CPR:5 – Agonist (activating ligand) (ChemProt CPR5).
+    "CPR:5": ["Activation", "IncreaseAmount"],
+    # CPR:6 – Antagonist (blocking ligand) (ChemProt CPR6).
+    "CPR:6": ["Inhibition", "DecreaseAmount"],
+    # CPR:7 – Modulator (context-dependent regulator) (ChemProt CPR7).
+    "CPR:7": ["Activation", "Inhibition"],
+    # CPR:8 – Cofactor / required binding partner (ChemProt CPR8).
+    "CPR:8": ["Complex"],
+    # CPR:9 – Substrate (entity acted on by an enzyme) (ChemProt CPR9).
+    "CPR:9": ["Conversion", "Complex"],
+    # CPR:10 – Product-of relation (ChemProt CPR10) – map to conversion outcomes.
+    "CPR:10": ["Conversion"],
+    # Positive_Correlation: entities covary positively in text (BioRED).
+    "Positive_Correlation": ["Activation", "IncreaseAmount"],
+    # Negative_Correlation: entities covary inversely in text (BioRED).
+    "Negative_Correlation": ["Inhibition", "DecreaseAmount"],
+}
+
 
 class IndraStructuredExtractor:
     def __init__(
@@ -295,9 +336,22 @@ class IndraStructuredExtractor:
                 continue
             if gate2_prediction == "no_relation":
                 continue
-            if gate3_prediction in (None, "no_relation", "unknown"):
+
+            gate2_type_candidates = GATE2_TO_INDRA_TYPE.get(gate2_prediction, [])
+            stmt_type = None
+
+            if gate2_type_candidates:
+                if gate3_prediction in gate2_type_candidates:
+                    stmt_type = gate3_prediction
+                else:
+                    stmt_type = gate2_type_candidates[0]
+            else:
+                if gate3_prediction in (None, "no_relation", "unknown"):
+                    continue
+                stmt_type = gate3_prediction
+
+            if stmt_type in (None, "No_Relation", "unknown"):
                 continue
-            stmt_type = gate3_prediction
 
             roles = stmt['role_pred']['roles']
             mutations_pred = stmt['mutations_pred']['mutations']
