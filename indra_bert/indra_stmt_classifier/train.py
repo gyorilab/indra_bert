@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from datasets import concatenate_datasets, Dataset
+from datasets import concatenate_datasets, Dataset, DatasetDict
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from transformers import (
     AutoTokenizer,
@@ -136,6 +136,17 @@ def parse_args():
     parser.add_argument("--gate2_loss_weight", type=float, default=0.5)
     parser.add_argument("--gate3_loss_weight", type=float, default=0.25)
     parser.add_argument("--eval_strategy", type=str, default="epoch")  # "no", "steps", or "epoch"
+    parser.add_argument(
+        "--cache_dir",
+        type=Path,
+        default=None,
+        help="Optional directory for caching tokenized datasets.",
+    )
+    parser.add_argument(
+        "--use_cached_dataset",
+        action="store_true",
+        help="Load tokenized datasets from cache_dir if available.",
+    )
     return parser.parse_args()
 
 
@@ -154,58 +165,83 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.add_special_tokens({"additional_special_tokens": ["<e>", "</e>"]})
 
-    # ----- Relation dataset (Gate1 + Gate2) -----
-    relation_examples = load_relation_binary_dataset(args.relation_path)
-    subtype2id = build_relation_subtype_mapping(relation_examples)
-    relation_splits = create_dataset_splits(relation_examples, seed=args.seed)
+    cache_dir = args.cache_dir
+    if cache_dir is None and args.use_cached_dataset:
+        cache_dir = args.output_dir / "cached_dataset"
+    if cache_dir is not None:
+        cache_dir = cache_dir.resolve()
+    args.cache_dir = cache_dir
 
-    relation_train = tokenize_relation_dataset(relation_splits["train"], tokenizer, subtype2id)
-    relation_val = tokenize_relation_dataset(relation_splits["validation"], tokenizer, subtype2id)
-    relation_test = tokenize_relation_dataset(relation_splits["test"], tokenizer, subtype2id)
+    if args.use_cached_dataset and cache_dir and cache_dir.exists():
+        dataset_dict = DatasetDict.load_from_disk(str(cache_dir))
+        train_dataset = dataset_dict["train"]
+        eval_dataset = dataset_dict["eval"]
+        test_dataset = dataset_dict["test"]
+        with open(cache_dir / "relation_subtype2id.json", "r", encoding="utf-8") as fh:
+            subtype2id = json.load(fh)
+        with open(cache_dir / "indra_label2id.json", "r", encoding="utf-8") as fh:
+            indra2id = json.load(fh)
+    else:
+        # ----- Relation dataset (Gate1 + Gate2) -----
+        relation_examples = load_relation_binary_dataset(args.relation_path)
+        subtype2id = build_relation_subtype_mapping(relation_examples)
+        relation_splits = create_dataset_splits(relation_examples, seed=args.seed)
 
-    # ----- INDRA dataset (Gate3) -----
-    indra_examples = load_indra_benchmark_dataset(args.indra_path)
-    indra2id = build_indra_label_mapping(indra_examples)
-    indra_dataset = Dataset.from_list(indra_examples)
+        relation_train = tokenize_relation_dataset(relation_splits["train"], tokenizer, subtype2id)
+        relation_val = tokenize_relation_dataset(relation_splits["validation"], tokenizer, subtype2id)
+        relation_test = tokenize_relation_dataset(relation_splits["test"], tokenizer, subtype2id)
 
-    indra_split = indra_dataset.train_test_split(test_size=0.2, seed=args.seed)
-    indra_val_test = indra_split["test"].train_test_split(test_size=0.5, seed=args.seed)
+        # ----- INDRA dataset (Gate3) -----
+        indra_examples = load_indra_benchmark_dataset(args.indra_path)
+        indra2id = build_indra_label_mapping(indra_examples)
+        indra_dataset = Dataset.from_list(indra_examples)
 
-    indra_train = tokenize_indra_dataset(indra_split["train"], tokenizer, indra2id)
-    indra_val = tokenize_indra_dataset(indra_val_test["train"], tokenizer, indra2id)
-    indra_test = tokenize_indra_dataset(indra_val_test["test"], tokenizer, indra2id)
+        indra_split = indra_dataset.train_test_split(test_size=0.2, seed=args.seed)
+        indra_val_test = indra_split["test"].train_test_split(test_size=0.5, seed=args.seed)
 
-    # ----- Align columns / add missing gates -----
-    keep_cols = {
-        "input_ids",
-        "token_type_ids",
-        "attention_mask",
-        "gate1_labels",
-        "gate2_labels",
-        "gate3_labels",
-    }
+        indra_train = tokenize_indra_dataset(indra_split["train"], tokenizer, indra2id)
+        indra_val = tokenize_indra_dataset(indra_val_test["train"], tokenizer, indra2id)
+        indra_test = tokenize_indra_dataset(indra_val_test["test"], tokenizer, indra2id)
 
-    relation_train = align_columns(relation_train, keep_cols)
-    relation_val = align_columns(relation_val, keep_cols)
-    relation_test = align_columns(relation_test, keep_cols)
+        # ----- Align columns / add missing gates -----
+        keep_cols = {
+            "input_ids",
+            "token_type_ids",
+            "attention_mask",
+            "gate1_labels",
+            "gate2_labels",
+            "gate3_labels",
+        }
 
-    def ensure_columns(ds: Dataset):
-        for col in keep_cols:
-            if col not in ds.column_names:
-                filler = np.zeros(len(ds), dtype=np.int64)
-                if col.startswith("gate"):
-                    filler.fill(IGNORE_INDEX)
-                ds = ds.add_column(col, filler)
-        return align_columns(ds, keep_cols)
+        relation_train = align_columns(relation_train, keep_cols)
+        relation_val = align_columns(relation_val, keep_cols)
+        relation_test = align_columns(relation_test, keep_cols)
 
-    indra_train = ensure_columns(indra_train)
-    indra_val = ensure_columns(indra_val)
-    indra_test = ensure_columns(indra_test)
+        def ensure_columns(ds: Dataset):
+            for col in keep_cols:
+                if col not in ds.column_names:
+                    filler = np.zeros(len(ds), dtype=np.int64)
+                    if col.startswith("gate"):
+                        filler.fill(IGNORE_INDEX)
+                    ds = ds.add_column(col, filler)
+            return align_columns(ds, keep_cols)
 
-    # ----- Merge for multitask training -----
-    train_dataset = concatenate_datasets([relation_train, indra_train]).shuffle(args.seed)
-    eval_dataset = concatenate_datasets([relation_val, indra_val]).shuffle(args.seed)
-    test_dataset = concatenate_datasets([relation_test, indra_test]).shuffle(args.seed)
+        indra_train = ensure_columns(indra_train)
+        indra_val = ensure_columns(indra_val)
+        indra_test = ensure_columns(indra_test)
+
+        # ----- Merge for multitask training -----
+        train_dataset = concatenate_datasets([relation_train, indra_train]).shuffle(args.seed)
+        eval_dataset = concatenate_datasets([relation_val, indra_val]).shuffle(args.seed)
+        test_dataset = concatenate_datasets([relation_test, indra_test]).shuffle(args.seed)
+
+        if cache_dir:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            DatasetDict(train=train_dataset, eval=eval_dataset, test=test_dataset).save_to_disk(str(cache_dir))
+            with open(cache_dir / "relation_subtype2id.json", "w", encoding="utf-8") as fh:
+                json.dump(subtype2id, fh, indent=2)
+            with open(cache_dir / "indra_label2id.json", "w", encoding="utf-8") as fh:
+                json.dump(indra2id, fh, indent=2)
 
     # ----- Model -----
     config = AutoConfig.from_pretrained(args.model_name)
