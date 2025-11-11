@@ -261,6 +261,8 @@ def main():
     save_strategy = "epoch" if eval_strategy != "no" else "no"
     load_best = eval_strategy != "no"
 
+    save_total_limit = 2 if load_best else 1
+
     training_args = TrainingArguments(
         output_dir=str(args.output_dir),
         num_train_epochs=args.epochs,
@@ -276,6 +278,7 @@ def main():
         metric_for_best_model="gate1_f1",
         greater_is_better=True,
         label_names=["gate1_labels", "gate2_labels", "gate3_labels"],
+        save_total_limit=save_total_limit,
     )
 
     data_collator = MultiHeadDataCollator(tokenizer)
