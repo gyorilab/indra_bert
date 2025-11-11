@@ -46,3 +46,20 @@ example = '<e>BRCA1</e> activates <e>RAD51</e> in DNA repair.'
 print('\nSample inference:')
 print(classifier.predict(example))
 PY
+
+python - <<'PY'
+from huggingface_hub import upload_folder
+
+repo_id = "thomaslim6793/indra_bert_indra_stmt_classifier"
+folder_path = "output/indra_stmt_classifier"
+ignore_patterns = ["checkpoint-*", "cached_dataset", "cached_dataset/*"]
+
+print("\nUploading trained model to Hugging Face Hub...")
+upload_folder(
+    repo_id=repo_id,
+    folder_path=folder_path,
+    commit_message="Update multitask INDRA statement classifier",
+    ignore_patterns=ignore_patterns,
+)
+print("Upload complete.")
+PY
