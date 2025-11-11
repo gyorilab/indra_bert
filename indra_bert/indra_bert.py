@@ -35,46 +35,77 @@ PTM_STMT_TYPES = {
     "Methylation", "Demethylation"
 }
 
+# Mapping for all compatible mapping from gate2 labels to gate3 (INDRA type) labels.
 GATE2_TO_INDRA_TYPE = {
-    # Association: generic, non-directional relatedness (BioRED / BC5CDR).
-    "Association": ["Association"],
-    # Bind: physical binding / complex formation between entities (ChemProt / BioRED).
+    # BioRED labels
+    # Association: generic, non-directional relatedness.
+    "Association": ["PTM"],
+    # Bind: physical binding / complex formation between entities.
     "Bind": ["Complex"],
-    # Drug_Interaction: pharmacologic or biochemical interaction between drugs and proteins.
-    "Drug_Interaction": ["Complex", "Association"],
-    # Conversion: biochemical conversion / metabolic transformation (BioRED conversion label).
+    # Comparison: comparative statement linking two entities (e.g., higher/lower).
+    "Comparison": [],
+    # Conversion: biochemical conversion / metabolic transformation.
     "Conversion": ["Conversion"],
-    # CID: chemical-induced disease relationship (BC5CDR).
-    "CID": ["IncreaseAmount", "Association"],
-    # Cotreatment: co-administration / combined treatment scenario (BioRED).
-    "Cotreatment": ["Association"],
-    # Comparison: comparative statement linking two entities (e.g., higher/lower) (BioRED).
-    "Comparison": ["Association"],
-    # CPR:1 – Part-of/component relation (ChemProt CPR1).
-    "CPR:1": ["Association", "Complex"],
-    # CPR:2 – Regulator (direction unspecified) (ChemProt CPR2); we bias toward increase-oriented INDRA types.
-    "CPR:2": ["Activation", "IncreaseAmount"],
-    # CPR:3 – Upregulator (increases activity/expression) (ChemProt CPR3).
-    "CPR:3": ["Activation", "IncreaseAmount"],
-    # CPR:4 – Downregulator (decreases activity/expression) (ChemProt CPR4).
-    "CPR:4": ["Inhibition", "DecreaseAmount"],
-    # CPR:5 – Agonist (activating ligand) (ChemProt CPR5).
-    "CPR:5": ["Activation", "IncreaseAmount"],
-    # CPR:6 – Antagonist (blocking ligand) (ChemProt CPR6).
-    "CPR:6": ["Inhibition", "DecreaseAmount"],
-    # CPR:7 – Modulator (context-dependent regulator) (ChemProt CPR7).
-    "CPR:7": ["Activation", "Inhibition"],
-    # CPR:8 – Cofactor / required binding partner (ChemProt CPR8).
+    # Cotreatment: co-administration / combined treatment scenario.
+    "Cotreatment": [],
+    # Drug_Interaction: pharmacologic or biochemical interaction between drugs and proteins.
+    "Drug_Interaction": [],
+    # Negative_Correlation: entities covary inversely in text.
+    "Negative_Correlation": ["PTM"],
+    # Positive_Correlation: entities covary positively in text.
+    "Positive_Correlation": ["PTM"],
+
+    # BC5CDR labels
+    # CID: chemical-induced disease relationship.
+    "CID": [],
+
+    # ChemProt labels
+    # CPR:1 – PART_OF.
+    "CPR:1": ["PTM", "Complex"],
+    # CPR:2 – REGULATOR | DIRECT_REGULATOR | INDIRECT_REGULATOR.
+    "CPR:2": ["PTM", "Complex", "Activation", "Inhibition", "IncreaseAmount", "DecreaseAmount"],
+    # CPR:3 – UPREGULATOR | ACTIVATOR | INDIRECT_UPREGULATOR.
+    "CPR:3": ["PTM", "Activation", "IncreaseAmount"],
+    # CPR:4 – DOWNREGULATOR | INHIBITOR | INDIRECT_DOWNREGULATOR.
+    "CPR:4": ["PTM", "Inhibition", "DecreaseAmount"],
+    # CPR:5 – AGONIST | AGONIST-ACTIVATOR | AGONIST-INHIBITOR.
+    "CPR:5": ["Complex", "Activation"],
+    # CPR:6 – ANTAGONIST (blocking ligand).
+    "CPR:6": ["Complex", "Inhibition"],
+    # CPR:7 – MODULATOR | MODULATOR-ACTIVATOR | MODULATOR-INHIBITOR (context-dependent regulator).
+    "CPR:7": ["PTM", "Complex", "Activation", "Inhibition", "IncreaseAmount", "DecreaseAmount"],
+    # CPR:8 – COFACTOR (required binding partner).
     "CPR:8": ["Complex"],
-    # CPR:9 – Substrate (entity acted on by an enzyme) (ChemProt CPR9).
-    "CPR:9": ["Conversion", "Complex"],
-    # CPR:10 – Product-of relation (ChemProt CPR10) – map to conversion outcomes.
-    "CPR:10": ["Conversion"],
-    # Positive_Correlation: entities covary positively in text (BioRED).
-    "Positive_Correlation": ["Activation", "IncreaseAmount"],
-    # Negative_Correlation: entities covary inversely in text (BioRED).
-    "Negative_Correlation": ["Inhibition", "DecreaseAmount"],
+    # CPR:9 – SUBSTRATE | PRODUCT_OF | SUBSTRATE_PRODUCT_OF (primary biotransformation relation).
+    "CPR:9": ["PTM", "Conversion"],
+    # CPR:10 – NOT (no meaningful relation).
+    "CPR:10": []
 }
+
+
+def _has_required_roles(stmt_type: str, agent_roles: dict) -> bool:
+    """Ensure required semantic roles are present before emitting a statement."""
+    if not agent_roles:
+        return False
+
+    if stmt_type in PTM_STMT_TYPES:
+        has_enz = "enz" in agent_roles
+        has_sub = any(role in agent_roles for role in ("sub", "substrate", "object"))
+        return has_enz and has_sub
+
+    if stmt_type in {"Activation", "Inhibition", "IncreaseAmount", "DecreaseAmount"}:
+        has_subj = "subj" in agent_roles
+        has_obj = any(role in agent_roles for role in ("obj", "object"))
+        return has_subj and has_obj
+
+    if stmt_type in {"Complex", "Association"}:
+        member_count = sum(1 for role in agent_roles if role.startswith("members"))
+        return member_count >= 2
+
+    if stmt_type == "Translocation":
+        return "agent" in agent_roles
+
+    return True
 
 
 class IndraStructuredExtractor:
@@ -340,7 +371,12 @@ class IndraStructuredExtractor:
             gate2_type_candidates = GATE2_TO_INDRA_TYPE.get(gate2_prediction, [])
             stmt_type = None
 
-            if gate2_type_candidates:
+            if "PTM" in gate2_type_candidates:
+                if gate3_prediction in PTM_STMT_TYPES:
+                    stmt_type = gate3_prediction
+                else:
+                    continue
+            elif gate2_type_candidates:
                 if gate3_prediction in gate2_type_candidates:
                     stmt_type = gate3_prediction
                 else:
@@ -354,6 +390,47 @@ class IndraStructuredExtractor:
                 continue
 
             roles = stmt['role_pred']['roles']
+            ner_info = stmt.get('ner_info', {})
+            ner_entities = ner_info.get('all_entities') or []
+            ner_span_index = {
+                (ent.get('start'), ent.get('end')): ent
+                for ent in ner_entities
+                if ent.get('start') is not None and ent.get('end') is not None
+            }
+
+            reconciled_roles = []
+            for role_info in roles:
+                start = role_info.get('start')
+                end = role_info.get('end')
+                text = role_info.get('text')
+                role = role_info.get('role')
+
+                ner_ent = ner_span_index.get((start, end))
+                if ner_ent is None:
+                    ner_ent = next(
+                        (e for e in ner_entities
+                         if e.get('text') == text and e.get('start') is not None and e.get('end') is not None),
+                        None
+                    )
+                if ner_ent is None:
+                    logger.debug(
+                        "Dropping role span with no matching NER entity: role=%s, span=(%s, %s, %s)",
+                        role, start, end, text
+                    )
+                    continue
+
+                reconciled_roles.append({
+                    "role": role,
+                    "start": ner_ent.get('start', start),
+                    "end": ner_ent.get('end', end),
+                    "text": ner_ent.get('text', text),
+                    "type": ner_ent.get('type'),
+                    "raw_type": ner_ent.get('raw_type')
+                })
+
+            if not reconciled_roles:
+                continue
+
             mutations_pred = stmt['mutations_pred']['mutations']
             ptm_sites = stmt.get('ptm_sites_pred', {}).get('sites', [])
 
@@ -362,33 +439,42 @@ class IndraStructuredExtractor:
             coords = []
             ptm_sites_list = []
 
-            for role_info in roles:
+            for role_info in reconciled_roles:
                 role = role_info['role']
                 name = role_info['text']
                 start = role_info['start']
                 end = role_info['end']
+
                 raw_texts.append(name)
                 coords.append([start, end])
 
                 agent_roles[role] = {
                     "name": name,
+                    "type": role_info.get('type'),
+                    "raw_type": role_info.get('raw_type'),
                     "db_refs": {
                         "TEXT": name
                     }
                 }
                 
-                if mutations_pred.get((start, end, name), None):
-                    # Parse mutations to INDRA-compatible format
-                    raw_mutations = mutations_pred[(start, end, name)]
+                mutation_key = (start, end, name)
+                if mutation_key not in mutations_pred:
+                    mutation_key = next(
+                        (key for key in mutations_pred.keys()
+                         if len(key) == 3 and key[0] == start and key[1] == end),
+                        mutation_key
+                    )
+
+                if mutations_pred.get(mutation_key):
+                    raw_mutations = mutations_pred[mutation_key]
                     parsed_mutations = convert_to_indra_mutations(raw_mutations)
                     agent_roles[role]["mutations"] = parsed_mutations
 
-            # Collect PTM sites for object/substrate agents
+            # Collect PTM sites for object/substrate agents using reconciled spans
             for ptm_site in ptm_sites:
                 site_agent = ptm_site.get('agent', {})
                 agent_key = (site_agent.get('start'), site_agent.get('end'), site_agent.get('text'))
-                # Check if this site belongs to an object/substrate agent
-                for role_info in roles:
+                for role_info in reconciled_roles:
                     if (role_info['start'], role_info['end'], role_info['text']) == agent_key:
                         if role_info.get('role') in ('object', 'substrate', 'sub'):
                             ptm_sites_list.append({
@@ -398,7 +484,6 @@ class IndraStructuredExtractor:
                                 "text": ptm_site.get('text'),
                                 "agent_role": role_info['role']
                             })
-                            # Add mods to the agent
                             if "mods" not in agent_roles[role_info['role']]:
                                 agent_roles[role_info['role']]["mods"] = []
                             agent_roles[role_info['role']]["mods"].append({
@@ -407,6 +492,14 @@ class IndraStructuredExtractor:
                                 "position": ptm_site.get('position')
                             })
                             break
+
+            if not _has_required_roles(stmt_type, agent_roles):
+                logger.debug(
+                    "Skipping %s statement due to missing required roles: %s",
+                    stmt_type,
+                    list(agent_roles.keys()),
+                )
+                continue
 
             evidence_annotations = {
                 "agents": {
