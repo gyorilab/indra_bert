@@ -382,11 +382,9 @@ class IndraStructuredExtractor:
                 else:
                     stmt_type = gate2_type_candidates[0]
             else:
-                if gate3_prediction in (None, "no_relation", "unknown"):
-                    continue
-                stmt_type = gate3_prediction
+                continue
 
-            if stmt_type in (None, "No_Relation", "unknown"):
+            if stmt_type in (None, "no_relation","No_Relation", "unknown"):
                 continue
 
             roles = stmt['role_pred']['roles']

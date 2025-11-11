@@ -25,7 +25,7 @@ fi
 
 python -m indra_bert.indra_stmt_classifier.train \
     --relation_path data/train/statement_classification/combined/relation_binary.jsonl \
-    --indra_path data/train/indra_benchmark_annotated_data/indra_benchmark_corpus_annotated_stratified_sample_2000.jsonl \
+    --indra_path data/train/indra_benchmark_annotated_data/indra_benchmark_corpus_annotated_stratified_sample_2000_with_heuristic_filtered_negatives.jsonl \
     --output_dir output/indra_stmt_classifier \
     --epochs 10 \
     --train_batch_size 32 \
