@@ -1,103 +1,103 @@
-from transformers import AutoTokenizer
-import torch
+import json
 from pathlib import Path
-from .preprocess import preprocess_for_inference, preprocess_for_inference_batch
-from .bert_classification_head import TwoGatedClassifier
+from typing import List, Optional
+
+import torch
+from transformers import AutoTokenizer, AutoConfig
+
+from .model import MultiHeadStmtClassifier
+from .preprocess import (
+    preprocess_for_inference,
+    preprocess_for_inference_batch
+)
 
 
 class IndraStmtClassifier:
-    def __init__(self, model_path, device=None):
-        model_path = Path(model_path)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        
-        self.model = TwoGatedClassifier.from_pretrained(model_path)
-            
+    def __init__(self, model_path: str | Path, device: Optional[torch.device] = None):
+        self.model_path = Path(model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+        if "<e>" not in self.tokenizer.get_vocab():
+            self.tokenizer.add_special_tokens({"additional_special_tokens": ["<e>", "</e>"]})
+
+        binary_label_map_path = self.model_path / "binary_label2id.json"
+        relation_map_path = self.model_path / "relation_subtype2id.json"
+        indra_map_path = self.model_path / "indra_label2id.json"
+        if not binary_label_map_path.exists() or not relation_map_path.exists() or not indra_map_path.exists():
+            raise FileNotFoundError("Label mapping files not found in model directory.")
+
+        with binary_label_map_path.open("r", encoding="utf-8") as fh:
+            self.binary_label2id = {str(k): int(v) for k, v in json.load(fh).items()}
+        with relation_map_path.open("r", encoding="utf-8") as fh:
+            self.relation_subtype2id = json.load(fh)
+        with indra_map_path.open("r", encoding="utf-8") as fh:
+            self.indra_label2id = json.load(fh)
+
+        self.id2binary_label = {v: k for k, v in self.binary_label2id.items()}
+        self.id2relation_subtype = {v: k for k, v in self.relation_subtype2id.items()}
+        self.id2indra_label = {v: k for k, v in self.indra_label2id.items()}
+
+        config = AutoConfig.from_pretrained(self.model_path)
+        self.model = MultiHeadStmtClassifier.from_pretrained(
+            self.model_path,
+            config=config,
+            gate2_num_labels=len(self.relation_subtype2id),
+            gate3_num_labels=len(self.indra_label2id),
+        )
+        self.model.resize_token_embeddings(len(self.tokenizer))
+
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
+        self.model.to(self.device)
         self.model.eval()
 
-        # Device (auto detect)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") if device is None else device
-        self.model.to(self.device)
-        self.id2label = self.model.config.id2label
-
-    def predict(self, text):
-        enc = preprocess_for_inference(
-            text=text,
-            tokenizer=self.tokenizer,
-        )
-
-        input_ids = enc["input_ids"].to(self.device)
-        attention_mask = enc["attention_mask"].to(self.device)
-
-        with torch.no_grad():
-            # Use two-gated prediction
-            outputs = self.model.predict(
-                input_ids=input_ids,
-                attention_mask=attention_mask
-            )
-            predicted_class = outputs['predictions'][0]
-            confidence = outputs['confidences'][0]
-            
-            # Handle -1 (no relation) predictions
-            if predicted_class == -1:
-                predicted_label = "No_Relation"
-            else:
-                predicted_label = self.id2label[predicted_class]
-            
-            # Create probability distribution from gate outputs
-            gate2_probs = outputs['gate2_probs'][0]
-            prob_dist = {self.id2label[i]: gate2_probs[i].item() for i in range(len(self.id2label))}
-
-        return {
-            "predicted_label": predicted_label,
-            "confidence": confidence,
-            "probabilities": prob_dist,
-            "input_ids": enc["input_ids"],
-            "decoded_text": self.tokenizer.decode(enc["input_ids"].squeeze()),
-            "original_text": text
-        }
-
-    def predict_batch(self, texts: list[str]):
-        assert isinstance(texts, list) and len(texts) > 0, "Input must be a non-empty list of strings."
-        assert all(isinstance(text, str) for text in texts), "All elements in the input list must be strings."
-
-        # Step 1: Batch tokenization
-        enc = preprocess_for_inference_batch(
-            texts=texts,
-            tokenizer=self.tokenizer
-        )
-
-        input_ids = enc["input_ids"].to(self.device)
-        attention_mask = enc["attention_mask"].to(self.device)
-
-        # Step 2: Model inference
-        with torch.no_grad():
-            # Use two-gated prediction
-            outputs = self.model.predict(
-                input_ids=input_ids,
-                attention_mask=attention_mask
-            )
-            predicted_classes = outputs['predictions']
-            confidences = outputs['confidences']
-            gate2_probs = outputs['gate2_probs']
+    def _format_output(self, batch_output, threshold: float) -> List[dict]:
+        gate1_preds = batch_output["gate1_predictions"].cpu().tolist()
+        gate1_probs = batch_output["gate1_probs"].cpu().tolist()
+        gate2_preds = batch_output["gate2_predictions"].cpu().tolist()
+        gate2_probs = batch_output["gate2_probs"].cpu().tolist()
+        gate3_preds = batch_output["gate3_predictions"].cpu().tolist()
+        gate3_probs = batch_output["gate3_probs"].cpu().tolist()
 
         results = []
-        for i in range(len(texts)):
-            # Handle -1 (no relation) predictions
-            if predicted_classes[i] == -1:
-                predicted_label = "No_Relation"
-            else:
-                predicted_label = self.id2label[predicted_classes[i]]
-                
-            confidence = confidences[i]
-            prob_dist = {self.id2label[j]: gate2_probs[i][j].item() for j in range(len(self.id2label))}
-
-            results.append({
-                "predicted_label": predicted_label,
-                "confidence": confidence,
-                "probabilities": prob_dist,
-                "input_ids": input_ids[i],
-                "decoded_text": self.tokenizer.decode(input_ids[i]),
-                "original_text": texts[i]            
-            })
-
+        for g1_pred, g1_prob, g2_pred, g2_prob, g3_pred, g3_prob in zip(
+            gate1_preds, gate1_probs, gate2_preds, gate2_probs, gate3_preds, gate3_probs
+        ):
+            gate1_label = self.id2binary_label.get(g1_pred)
+            subtype_label = self.id2relation_subtype.get(g2_pred, "unknown")
+            indra_label = self.id2indra_label.get(g3_pred, "unknown")
+            gate1_prob_map = {
+                self.id2binary_label.get(idx, str(idx)): prob 
+                for idx, prob in enumerate(g1_prob)
+            }
+            gate2_prob_map = {
+                self.id2relation_subtype.get(idx, str(idx)): prob
+                for idx, prob in enumerate(g2_prob)
+            }
+            gate3_prob_map = {
+                self.id2indra_label.get(idx, str(idx)): prob
+                for idx, prob in enumerate(g3_prob)
+            }
+            results.append(
+                {
+                    "gate1_prediction": gate1_label,
+                    "gate1_probs": gate1_prob_map,
+                    "gate2_prediction": subtype_label,
+                    "gate2_probs": gate2_prob_map,
+                    "gate3_prediction": indra_label,
+                    "gate3_probs": gate3_prob_map,
+                }
+            )
         return results
+
+    def predict(self, text: str, threshold: float = 0.5) -> dict:
+        enc = preprocess_for_inference(text, self.tokenizer)
+        enc = {k: v.to(self.device) for k, v in enc.items()}
+        output = self.model.predict(**enc, threshold=threshold)
+        return self._format_output(output, threshold)[0]
+
+    def predict_batch(self, texts: List[str], threshold: float = 0.5) -> List[dict]:
+        enc = preprocess_for_inference_batch(texts, self.tokenizer)
+        enc = {k: v.to(self.device) for k, v in enc.items()}
+        output = self.model.predict(**enc, threshold=threshold)
+        return self._format_output(output, threshold)

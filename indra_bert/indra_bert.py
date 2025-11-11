@@ -2,7 +2,7 @@ __all__ = ['IndraStructuredExtractor']
 
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Union
 from itertools import combinations
 
 from huggingface_hub import hf_hub_download
@@ -13,6 +13,7 @@ from .indra_agent_role_assigner.inference import IndraAgentsTagger
 from .agent_mutation_detector.inference import AgentMutationDetector
 from .ptm_site_extractor.inference import PTMSiteExtractor
 from .utils.annotate import annotate_entities
+from .utils.semantic_type_filter import TypeConstraintConfig, filter_statements_by_type_constraints
 from .utils.parse_mutation import convert_to_indra_mutations
 import logging
 logger = logging.getLogger(__name__)
@@ -36,19 +37,19 @@ PTM_STMT_TYPES = {
 
 
 class IndraStructuredExtractor:
-    def __init__(self, 
-                 ner_model_path="thomaslim6793/indra_bert_ner_agent_detection",
-                 stmt_model_path="thomaslim6793/indra_bert_indra_stmt_classifier", 
-                 role_model_path="thomaslim6793/indra_bert_indra_stmt_agents_role_assigner",
-                 mutations_model_path="thomaslim6793/indra_bert_agent_mutation_detection",
-                 ptm_site_model_path="thomaslim6793/indra_bert_ptm_site_extractor",
-                 stmt_conf_threshold=0.95):
+    def __init__(
+        self,
+        ner_model_path="thomaslim6793/indra_bert_ner_agent_detection",
+        stmt_model_path="thomaslim6793/indra_bert_indra_stmt_classifier",
+        role_model_path="thomaslim6793/indra_bert_indra_stmt_agents_role_assigner",
+        mutations_model_path="thomaslim6793/indra_bert_agent_mutation_detection",
+        ptm_site_model_path="thomaslim6793/indra_bert_ptm_site_extractor",
+    ):
         self.ner_model = AgentNERExtractor(ner_model_path)
         self.stmt_model = IndraStmtClassifier(stmt_model_path)
         self.role_model = IndraAgentsTagger(role_model_path)
         self.mutations_model = AgentMutationDetector(mutations_model_path)
         self.ptm_site_model = PTMSiteExtractor(ptm_site_model_path) if ptm_site_model_path else None
-        self.stmt_conf_threshold = stmt_conf_threshold
 
         self.ner_model_local_path = self._resolve_model_path(ner_model_path, "ner")
         self.stmt_model_local_path = self._resolve_model_path(stmt_model_path, "stmt")
@@ -68,7 +69,8 @@ class IndraStructuredExtractor:
             return local_path if local_path.is_absolute() else Path.cwd() / local_path
 
     def get_entity_pairs(self, entity_preds):
-        return list(combinations(entity_preds['entity_spans'], 2))
+        entities = entity_preds.get('entities') or entity_preds.get('entity_spans') or []
+        return list(combinations(entities, 2))
 
     def extract_structured_statements(self, text):
         stmts = []
@@ -80,21 +82,16 @@ class IndraStructuredExtractor:
             for pair in pairs:
                 annotated_text = annotate_entities(sentence, pair)
                 stmt_pred = self.stmt_model.predict(annotated_text)
-                stmt_conf = stmt_pred.get('confidence', 0.0)
+                stmt_label = stmt_pred.get('gate3_prediction') or "unknown"
 
-                if stmt_conf < self.stmt_conf_threshold:
-                    continue
-                if stmt_pred['predicted_label'] == "No_Relation":
-                    continue
-
-                role_pred = self.role_model.predict(stmt_pred['predicted_label'], annotated_text)
+                role_pred = self.role_model.predict(stmt_label, annotated_text)
                 
                 # Detect mutations for each agent in the pair
-                mutations_pred = self.mutations_model.predict(pair, annotated_text)
+                mutations_pred = self.mutations_model.predict(list(pair), annotated_text)
                 
                 # Detect PTM sites conditionally for PTM statement types
                 ptm_sites_pred = None
-                if self.ptm_site_model and stmt_pred['predicted_label'] in PTM_STMT_TYPES:
+                if self.ptm_site_model and stmt_label in PTM_STMT_TYPES:
                     # Get object/substrate agents from role prediction
                     object_agents = [r for r in role_pred.get('role_spans', []) 
                                    if r.get('role') in ('object', 'substrate', 'sub')]
@@ -107,14 +104,11 @@ class IndraStructuredExtractor:
                     'entity_pair': pair,
                     'annotated_text': annotated_text,
                     'ner_info': {
-                        'all_entities': entity_preds['entity_spans'],
+                        'all_entities': entity_preds.get('entities') or entity_preds.get('entity_spans', []),
                         'entity_pair': pair
                     },
-                    'stmt_pred': {
-                        'label': stmt_pred['predicted_label'],
-                        'confidence': stmt_conf,
-                        'raw_output': stmt_pred
-                    },
+                    'stmt_label': stmt_label,
+                    'stmt_pred': stmt_pred,
                     'role_pred': {
                         'roles': role_pred.get('role_spans', []),
                         'raw_output': role_pred
@@ -165,11 +159,16 @@ class IndraStructuredExtractor:
         final_pairs = []
 
         for i, stmt_pred in enumerate(stmt_preds_batch):
-            conf = stmt_pred.get('confidence', 0.0)
-            if conf >= self.stmt_conf_threshold:
-                role_inputs_text.append(stmt_inputs[i])
-                role_inputs_type.append(stmt_pred['predicted_label'])
-                final_pairs.append((stmt_pred, stmt_pair_info[i]))
+            stmt_label = stmt_pred.get('gate3_prediction') or "unknown"
+
+            role_inputs_text.append(stmt_inputs[i])
+            role_inputs_type.append(stmt_label)
+            final_pairs.append({
+                "stmt_label": stmt_label,
+                "prediction": stmt_pred,
+                "pair_info": stmt_pair_info[i],
+                "annotated_text": stmt_inputs[i],
+            })
 
         # STEP 3: Run role assignment in batch
         role_preds_batch = self.role_model.predict_batch(role_inputs_type, role_inputs_text)
@@ -177,9 +176,10 @@ class IndraStructuredExtractor:
         # STEP 4: Run mutation detection in batch
         mutations_inputs_pairs = []
         mutations_inputs_text = []
-        for (text, pair, ner_preds) in [x[1] for x in final_pairs]:
-            mutations_inputs_pairs.append(pair)
-            mutations_inputs_text.append(annotate_entities(text, pair))
+        for pair_data in final_pairs:
+            sentence, pair, _ = pair_data["pair_info"]
+            mutations_inputs_pairs.append(list(pair))
+            mutations_inputs_text.append(pair_data["annotated_text"])
         
         mutations_preds_batch = self.mutations_model.predict_batch(mutations_inputs_pairs, mutations_inputs_text)
 
@@ -190,8 +190,8 @@ class IndraStructuredExtractor:
             ptm_inputs_agents = []
             ptm_inputs_text = []
             
-            for i, (stmt_pred, (text, pair, ner_preds)) in enumerate(final_pairs):
-                stmt_type = stmt_pred['predicted_label']
+            for i, pair_data in enumerate(final_pairs):
+                stmt_type = pair_data["stmt_label"]
                 if stmt_type in PTM_STMT_TYPES:
                     # For PTM statements, extract sites from object/substrate agent
                     # Get object agent from role_pred
@@ -202,7 +202,7 @@ class IndraStructuredExtractor:
                     if object_agents:
                         ptm_stmt_indices.append(i)
                         ptm_inputs_agents.append(object_agents)
-                        ptm_inputs_text.append(annotate_entities(text, pair))
+                        ptm_inputs_text.append(pair_data["annotated_text"])
             
             if ptm_inputs_agents:
                 ptm_results = self.ptm_site_model.predict_batch(ptm_inputs_agents, ptm_inputs_text)
@@ -210,28 +210,24 @@ class IndraStructuredExtractor:
                     ptm_site_preds_batch[idx] = result
 
         # STEP 6: Assemble final results
-        for i, (stmt_pred, (text, pair, ner_preds), role_pred, mutations_pred) in enumerate(zip(
-                [x[0] for x in final_pairs],
-                [x[1] for x in final_pairs],
+        for i, (pair_data, role_pred, mutations_pred) in enumerate(zip(
+                final_pairs,
                 role_preds_batch,
                 mutations_preds_batch)):
-            
-            if stmt_pred['predicted_label'] == "No_Relation":
-                continue
+            stmt_label = pair_data["stmt_label"]
+            stmt_pred = pair_data["prediction"]
+            text, pair, ner_preds = pair_data["pair_info"]
 
             stmt = {
                 'original_text': text,
                 'entity_pair': pair,
-                'annotated_text': annotate_entities(text, pair),
+                'annotated_text': pair_data["annotated_text"],
                 'ner_info': {
-                    'all_entities': ner_preds['entity_spans'],
+                    'all_entities': ner_preds.get('entities') or ner_preds.get('entity_spans', []),
                     'entity_pair': pair
                 },
-                'stmt_pred': {
-                    'label': stmt_pred['predicted_label'],
-                    'confidence': stmt_pred['confidence'],
-                    'raw_output': stmt_pred
-                },
+                'stmt_label': stmt_label,
+                'stmt_pred': stmt_pred,
                 'role_pred': {
                     'roles': role_pred.get('role_spans', []),
                     'raw_output': role_pred
@@ -253,21 +249,55 @@ class IndraStructuredExtractor:
 
         return all_statements
     
-    def get_json_indra_stmts(self, text, source_api="indra_bert"):
+    def get_json_indra_stmts(
+        self,
+        text,
+        source_api="indra_bert",
+        semantic_type_filter: bool = True,
+        semantic_type_filter_config: Optional[Union[TypeConstraintConfig, dict]] = None,
+    ):
         """Extract statements and convert to INDRA-style JSON with agent coords."""
         try:
             structured_statements = self.extract_structured_statements_batch(text)
         except Exception as e:
             logger.warning(f"Batch extraction failed. Falling back to iterative extraction. Error: {e}")
             structured_statements = self.extract_structured_statements(text)
-        
+ 
+        if semantic_type_filter:
+            if semantic_type_filter_config is None:
+                cfg = TypeConstraintConfig()
+            elif isinstance(semantic_type_filter_config, TypeConstraintConfig):
+                cfg = semantic_type_filter_config
+            elif isinstance(semantic_type_filter_config, dict):
+                cfg = TypeConstraintConfig(**semantic_type_filter_config)
+            else:
+                raise TypeError(
+                    "semantic_type_filter_config must be a TypeConstraintConfig, dict, or None"
+                )
+
+            filter_result = filter_statements_by_type_constraints(structured_statements, config=cfg)
+            if filter_result.drop_reasons:
+                logger.debug(
+                    "Semantic type filtering dropped statements: %s",
+                    dict(filter_result.drop_reasons),
+                )
+            structured_statements = filter_result.kept_statements
+
         indra_statements = []
 
         for stmt in structured_statements:
-            stmt_type = stmt['stmt_pred']['label']
+            raw_pred = stmt.get('stmt_pred', {})
+            gate1_prediction = raw_pred.get('gate1_prediction')
+            gate2_prediction = raw_pred.get('gate2_prediction')
+            gate3_prediction = raw_pred.get('gate3_prediction')
 
-            if stmt_type== "No_Relation":
+            if gate1_prediction != "has_relation":
                 continue
+            if gate2_prediction == "no_relation":
+                continue
+            if gate3_prediction in (None, "no_relation", "unknown"):
+                continue
+            stmt_type = gate3_prediction
 
             roles = stmt['role_pred']['roles']
             mutations_pred = stmt['mutations_pred']['mutations']
