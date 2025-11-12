@@ -79,8 +79,12 @@ GATE2_TO_INDRA_TYPE = {
     # CPR:9 – SUBSTRATE | PRODUCT_OF | SUBSTRATE_PRODUCT_OF (primary biotransformation relation).
     "CPR:9": ["PTM", "Conversion"],
     # CPR:10 – NOT (no meaningful relation).
-    "CPR:10": []
+"CPR:10": []
 }
+
+GATE1_HAS_RELATION_THRESHOLD = 0.45
+GATE2_NO_RELATION_THRESHOLD = 0.9
+GATE3_CONF_THRESHOLD = 0.8
 
 
 def _has_required_roles(stmt_type: str, agent_roles: dict) -> bool:
@@ -362,13 +366,34 @@ class IndraStructuredExtractor:
             gate1_prediction = raw_pred.get('gate1_prediction')
             gate2_prediction = raw_pred.get('gate2_prediction')
             gate3_prediction = raw_pred.get('gate3_prediction')
+            gate1_probs = raw_pred.get('gate1_probs') or {}
+            gate2_probs = raw_pred.get('gate2_probs') or {}
+            gate3_probs = raw_pred.get('gate3_probs') or {}
 
-            if gate1_prediction != "has_relation":
+            gate1_has_prob = float(gate1_probs.get("has_relation", 0.0))
+            gate1_positive = gate1_prediction == "has_relation" or gate1_has_prob >= GATE1_HAS_RELATION_THRESHOLD
+            if not gate1_positive:
                 continue
+
+            gate2_no_prob = float(gate2_probs.get("no_relation", 0.0))
+            gate2_prediction_effective = gate2_prediction
+
             if gate2_prediction == "no_relation":
+                if gate2_no_prob >= GATE2_NO_RELATION_THRESHOLD:
+                    continue
+                else:
+                    non_no_candidates = [
+                        (label, prob) for label, prob in gate2_probs.items() if label != "no_relation"
+                    ]
+                    if non_no_candidates:
+                        gate2_prediction_effective = max(non_no_candidates, key=lambda x: x[1])[0]
+                    else:
+                        gate2_prediction_effective = None
+
+            if gate2_prediction_effective is None:
                 continue
 
-            gate2_type_candidates = GATE2_TO_INDRA_TYPE.get(gate2_prediction, [])
+            gate2_type_candidates = GATE2_TO_INDRA_TYPE.get(gate2_prediction_effective, [])
             stmt_type = None
 
             if "PTM" in gate2_type_candidates:
@@ -385,6 +410,12 @@ class IndraStructuredExtractor:
                 continue
 
             if stmt_type in (None, "no_relation","No_Relation", "unknown"):
+                continue
+
+            stmt_confidence = 0.0
+            if isinstance(gate3_probs, dict):
+                stmt_confidence = float(gate3_probs.get(stmt_type, gate3_probs.get(str(stmt_type), 0.0)))
+            if stmt_confidence < GATE3_CONF_THRESHOLD:
                 continue
 
             roles = stmt['role_pred']['roles']
