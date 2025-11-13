@@ -1,70 +1,60 @@
-"""Post-processing utilities for predicate detector outputs."""
-
-from __future__ import annotations
-
-from typing import Iterable, List, Sequence, Tuple
-
-from .preprocess import ID2LABEL, LABEL2ID
+from typing import List, Dict, Any, Tuple
 
 
-def decode_bio_labels(tokens: Sequence[str], labels: Sequence[int]) -> List[dict]:
-    """Convert BIO label ids back into token-index spans."""
-    spans: List[dict] = []
-    current_start = None
-
-    for idx, label_id in enumerate(labels):
-        label_name = ID2LABEL.get(label_id, "O")
-        if label_name == "B-PRED":
-            if current_start is not None:
-                spans.append({"start": current_start, "end": idx, "label": "PRED"})
-            current_start = idx
-        elif label_name == "I-PRED":
-            if current_start is None:
-                current_start = idx
-        else:
-            if current_start is not None:
-                spans.append({"start": current_start, "end": idx, "label": "PRED"})
-                current_start = None
-
-    if current_start is not None:
-        spans.append({"start": current_start, "end": len(labels), "label": "PRED"})
-
-    return spans
-
-
-def labels_to_bio_sequence(labels: Iterable[str]) -> List[int]:
-    """Convert BIO label names to label ids."""
-    return [LABEL2ID[label] for label in labels]
-
-
-def spans_from_offsets(
-    offsets: Sequence[Tuple[int, int]],
-    label_ids: Sequence[int],
-    text: str,
-) -> List[Tuple[int, int, str]]:
-    """Extract character-level spans from BIO label ids and offsets."""
-    spans: List[Tuple[int, int, str]] = []
-    current_start = None
-    current_end = None
-
-    for (start_char, end_char), label_id in zip(offsets, label_ids):
-        label_name = ID2LABEL.get(label_id, "O")
-        if start_char == end_char:
+def extract_trigger_spans_from_encoding(
+    tokens: List[str],
+    offset_mapping: List[Tuple[int, int]],
+    predicted_label_ids: List[int],
+    id2label: Dict[int, str],
+    text: str
+) -> List[Dict[str, Any]]:
+    """
+    Extract trigger spans from token predictions.
+    
+    Returns list of trigger spans with their roles.
+    """
+    spans = []
+    current_span = None
+    current_role = None
+    
+    for i, (label_id, (tok_start, tok_end)) in enumerate(zip(predicted_label_ids, offset_mapping)):
+        if tok_start is None or tok_end is None:
             continue
-        if label_name == "B-PRED":
-            if current_start is not None and current_end is not None:
-                spans.append((current_start, current_end, text[current_start:current_end]))
-            current_start = start_char
-            current_end = end_char
-        elif label_name == "I-PRED" and current_start is not None:
-            current_end = end_char
+        
+        label = id2label.get(label_id, "O")
+        
+        if label.startswith("B-trigger-"):
+            # Start of new trigger span
+            if current_span is not None:
+                # Save previous span
+                spans.append(current_span)
+            
+            # Extract role from label (B-trigger-Head or B-trigger-Tail)
+            role = label.replace("B-trigger-", "")
+            current_role = role
+            current_span = {
+                "start": tok_start,
+                "end": tok_end,
+                "text": text[tok_start:tok_end] if tok_start < len(text) and tok_end <= len(text) else "",
+                "role": role,
+            }
+        elif label.startswith("I-trigger-"):
+            # Continuation of trigger span
+            if current_span is not None:
+                # Extend the span
+                current_span["end"] = tok_end
+                if tok_start < len(text) and tok_end <= len(text):
+                    current_span["text"] = text[current_span["start"]:tok_end]
         else:
-            if current_start is not None and current_end is not None:
-                spans.append((current_start, current_end, text[current_start:current_end]))
-            current_start = None
-            current_end = None
-
-    if current_start is not None and current_end is not None:
-        spans.append((current_start, current_end, text[current_start:current_end]))
-
+            # O or other - end current span
+            if current_span is not None:
+                spans.append(current_span)
+                current_span = None
+                current_role = None
+    
+    # Don't forget the last span
+    if current_span is not None:
+        spans.append(current_span)
+    
     return spans
+

@@ -1,186 +1,172 @@
-"""Pre-processing utilities for predicate detector training."""
-
-from __future__ import annotations
-
+import csv
 import json
-import random
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple, Dict, Any
+from typing import List, Dict, Any, Tuple
+import re
 
-from tqdm import tqdm
-
-PRED_START = "<predicate>"
-PRED_END = "</predicate>"
-LABEL2ID = {"O": 0, "B-PRED": 1, "I-PRED": 2}
-ID2LABEL = {v: k for k, v in LABEL2ID.items()}
-
-
-@dataclass
-class RawPredicateExample:
-    """Minimal representation of an annotated sentence."""
-
-    id: int
-    text: str  # entity tags preserved, predicate tags removed (if present)
-    predicate_span: Tuple[int, int] | None
-    matches_hash: str
-    source_hash: str
-
-
-def parse_tagged_text(tagged_text: str) -> Tuple[str, Tuple[int, int] | None]:
-    """Return text without predicate tags and the predicate char span (if any).
-
-    If no ``<predicate>`` markers are present, the second element of the tuple is
-    ``None`` and the text is returned unchanged.
-    """
-    if PRED_START not in tagged_text:
-        return tagged_text, None
-
-    clean_chars: List[str] = []
-    i = 0
-    pred_start = None
-    pred_end = None
-
-    while i < len(tagged_text):
-        if tagged_text.startswith(PRED_START, i):
-            if pred_start is not None:
-                raise ValueError("Multiple <predicate> tags found in example")
-            i += len(PRED_START)
-            pred_start = len(clean_chars)
-            continue
-        if tagged_text.startswith(PRED_END, i):
-            if pred_start is None:
-                raise ValueError("Closing </predicate> without opening tag")
-            i += len(PRED_END)
-            pred_end = len(clean_chars)
-            continue
-
-        clean_chars.append(tagged_text[i])
-        i += 1
-
-    if pred_start is None or pred_end is None:
-        raise ValueError("Malformed predicate tags in example")
-
-    clean_text = ''.join(clean_chars)
-    return clean_text, (pred_start, pred_end)
-
-
-def read_annotated_jsonl(path: Path) -> Iterable[dict]:
-    """Yield entries from the filtered JSONL file."""
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            yield json.loads(line)
-
-
-def json_to_raw_example(entry: dict, example_id: int) -> RawPredicateExample:
-    """Convert a JSON entry into :class:`RawPredicateExample`."""
-    output_text = entry["output_text"]
-    text, span = parse_tagged_text(output_text)
-    return RawPredicateExample(
-        id=example_id,
-        text=text,
-        predicate_span=span,
-        matches_hash=str(entry.get("matches_hash", "")),
-        source_hash=str(entry.get("source_hash", "")),
-    )
-
-
-def load_and_preprocess_raw_data(input_path: Path) -> List[RawPredicateExample]:
-    """Load the filtered JSONL and produce raw predicate examples."""
-    examples: List[RawPredicateExample] = []
-
-    for idx, entry in enumerate(tqdm(read_annotated_jsonl(input_path), desc="Loading predicate annotations")):
-        try:
-            examples.append(json_to_raw_example(entry, idx))
-        except Exception as exc:  # pylint: disable=broad-except
-            tqdm.write(f"Skipping example {idx} due to parse error: {exc}")
-            continue
-
+def load_tsv_dataset(tsv_path: Path) -> List[Dict[str, Any]]:
+    """Load examples from TSV file."""
+    examples = []
+    with open(tsv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f, delimiter='\t')
+        for row in reader:
+            examples.append({
+                'doc_id': row['doc_id'],
+                'event_type': row['event_type'],
+                'event_id': row['event_id'],
+                'text': row['text'],
+                'annotated_text': row['annotated_text'],
+                'entity_text': row['entity_text'],
+                'entity_start': int(row['entity_start']),
+                'entity_end': int(row['entity_end']),
+                'trigger_text': row['trigger_text'],
+                'trigger_start': int(row['trigger_start']),
+                'trigger_end': int(row['trigger_end']),
+                'role': row['role'],  # Head or Tail
+            })
     return examples
 
 
-def _labels_from_offsets(
-    offsets: Sequence[Tuple[int, int]],
-    predicate_span: Tuple[int, int] | None,
-) -> List[int]:
-    """Generate label IDs aligned to tokenizer offsets."""
-    if predicate_span is None:
-        return [LABEL2ID["O"] for _ in offsets]
+def extract_entity_from_annotated(annotated_text: str) -> Tuple[str, int, int]:
+    """
+    Extract entity text and its position from annotated text.
+    Returns (entity_text, start_pos, end_pos) in the original text (without tags).
+    """
+    match = re.search(r'<e>(.*?)</e>', annotated_text)
+    if not match:
+        return None, -1, -1
+    
+    entity_text = match.group(1)
+    # Calculate position in original text (accounting for tags before this position)
+    tag_start = match.start()
+    # Count characters before this tag (excluding tag characters)
+    chars_before = len(re.sub(r'<[^>]+>', '', annotated_text[:tag_start]))
+    start_pos = chars_before
+    end_pos = start_pos + len(entity_text)
+    
+    return entity_text, start_pos, end_pos
 
-    pred_start, pred_end = predicate_span
-    labels: List[int] = []
-    started = False
 
-    for start_char, end_char in offsets:
-        if start_char == end_char:
-            labels.append(LABEL2ID["O"])
+def char_to_token_labels(tokens, offset_mapping, trigger_start: int, trigger_end: int, role: str, special_tokens=None):
+    """
+    Create BIO labels for trigger span with role information.
+    
+    Labels: B-trigger-Head, I-trigger-Head, B-trigger-Tail, I-trigger-Tail, O
+    """
+    if special_tokens is None:
+        special_tokens = {"<e>", "</e>"}
+    
+    labels = ["O"] * len(tokens)
+    role_label = role  # "Head" or "Tail"
+    
+    for i, (tok_start, tok_end) in enumerate(offset_mapping):
+        # Skip special tokens
+        if tokens[i] in special_tokens:
             continue
-        if start_char >= pred_end or end_char <= pred_start:
-            labels.append(LABEL2ID["O"])
+        if tok_start is None or tok_end is None:
             continue
-        labels.append(LABEL2ID["B-PRED"] if not started else LABEL2ID["I-PRED"])
-        started = True
-
+        if tok_end <= trigger_start or tok_start >= trigger_end:
+            continue
+        
+        # Token overlaps with trigger span
+        if tok_start == trigger_start:
+            labels[i] = f"B-trigger-{role_label}"
+        else:
+            labels[i] = f"I-trigger-{role_label}"
+    
     return labels
 
 
-def preprocess_examples_for_model(
-    examples: Sequence[RawPredicateExample],
-    tokenizer,
-    max_length: int = 256,
-    padding: bool | str = "longest",
-    truncation: bool = True,
-) -> Dict[str, Any]:
-    """Tokenise predicate examples and produce BIO label IDs.
+def build_label_mappings(examples):
+    """Build label2id and id2label mappings from examples."""
+    label_set = {"O"}  # Always include O
+    
+    for example in examples:
+        role = example['role']
+        label_set.add(f"B-trigger-{role}")
+        label_set.add(f"I-trigger-{role}")
+    
+    label2id = {label: idx for idx, label in enumerate(sorted(label_set))}
+    id2label = {idx: label for label, idx in label2id.items()}
+    return label2id, id2label
 
-    Parameters
-    ----------
-    examples:
-        Iterable of :class:`RawPredicateExample` produced by
-        :func:`load_and_preprocess_raw_data`.
-    tokenizer:
-        Hugging Face tokenizer used by the downstream model.
-    max_length:
-        Maximum sequence length passed to the tokenizer.
-    padding:
-        Padding strategy (``True``/``False``/``"longest"``) forwarded to the tokenizer.
-    truncation:
-        Whether to truncate sequences longer than ``max_length``.
 
-    Returns
-    -------
-    Dict[str, Any]
-        Dictionary compatible with Hugging Face ``Dataset`` expectations, containing
-        ``input_ids``, ``attention_mask``, ``labels`` and provenance metadata.
+def preprocess_examples(example: Dict[str, Any], tokenizer, label2id: Dict[str, int]) -> Dict[str, Any]:
     """
-    texts = [ex.text for ex in examples]
+    Preprocess a single example for training.
+    
+    Input: text with <e>entity</e> tagged
+    Output: tokenized input with BIO labels for trigger span and role
+    """
+    # Use annotated_text which has <e>entity</e> tags
+    annotated_text = example['annotated_text']
+    
+    # Remove <trigger> tags from annotated_text for input (we want to predict triggers)
+    # Keep only <e> tags
+    input_text = re.sub(r'</?trigger>', '', annotated_text)
+    
+    # Get original text (without any tags) for span calculations
+    original_text = example['text']
+    
+    # Tokenize the input_text (with <e> tags)
     encoding = tokenizer(
-        texts,
-        truncation=truncation,
-        max_length=max_length,
-        padding=padding,
-        add_special_tokens=True,
+        text=input_text,
         return_offsets_mapping=True,
+        truncation=True,
+        max_length=512,
+        padding=False,
+        add_special_tokens=True,
     )
+    
+    tokens = tokenizer.convert_ids_to_tokens(encoding["input_ids"])
+    offset_mapping = encoding["offset_mapping"]
+    
+    # Get trigger span from original text coordinates
+    trigger_start = example['trigger_start']
+    trigger_end = example['trigger_end']
+    role = example['role']
+    
+    # Map trigger positions from original_text to input_text coordinates
+    # Since input_text has <e> tags but original_text doesn't, we need to adjust
+    # Build mapping: for each position in original_text, find corresponding position in input_text
+    orig_to_input_map = {}
+    orig_idx = 0
+    input_idx = 0
+    
+    # Build character position mapping by skipping tags in input_text
+    while orig_idx < len(original_text) and input_idx < len(input_text):
+        if input_text[input_idx] == '<':
+            # Skip tag
+            while input_idx < len(input_text) and input_text[input_idx] != '>':
+                input_idx += 1
+            if input_idx < len(input_text):
+                input_idx += 1
+        else:
+            # This character corresponds to original_text[orig_idx]
+            orig_to_input_map[orig_idx] = input_idx
+            orig_idx += 1
+            input_idx += 1
+    
+    # Map trigger positions
+    mapped_trigger_start = orig_to_input_map.get(trigger_start, trigger_start)
+    mapped_trigger_end = orig_to_input_map.get(trigger_end - 1, trigger_end - 1) + 1 if (trigger_end - 1) in orig_to_input_map else trigger_end
+    
+    # Create BIO labels using mapped positions
+    bio_tags = char_to_token_labels(tokens, offset_mapping, mapped_trigger_start, mapped_trigger_end, role)
+    
+    # Convert labels to IDs
+    label_ids = [label2id.get(tag, label2id["O"]) for tag in bio_tags]
+    
+    return {
+        "input_ids": encoding["input_ids"],
+        "attention_mask": encoding["attention_mask"],
+        "labels": label_ids,
+        "offset_mapping": offset_mapping,
+        "tokens": tokens,
+        "text": original_text,  # Store original text for evaluation
+        "annotated_text": input_text,  # Store input text with <e> tags
+        "entity_text": example['entity_text'],
+        "trigger_text": example['trigger_text'],
+        "role": role,
+    }
 
-    offsets_list = encoding["offset_mapping"]
-
-    labels: List[List[int]] = []
-    processed_offsets: List[List[Tuple[int, int]]] = []
-    for offsets, ex in zip(offsets_list, examples):
-        labels.append(_labels_from_offsets(offsets, ex.predicate_span))
-        processed_offsets.append([(int(start), int(end)) for start, end in offsets])
-
-    encoding.pop("offset_mapping")
-    encoding["labels"] = labels
-    encoding["matches_hash"] = [ex.matches_hash for ex in examples]
-    encoding["source_hash"] = [ex.source_hash for ex in examples]
-    encoding["example_id"] = [ex.id for ex in examples]
-    encoding["offset_mapping"] = processed_offsets
-    encoding["text"] = [ex.text for ex in examples]
-    encoding["tokens"] = [tokenizer.convert_ids_to_tokens(ids) for ids in encoding["input_ids"]]
-
-    return encoding

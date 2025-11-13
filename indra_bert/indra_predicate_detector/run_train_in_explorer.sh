@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=indra_pred_detector_train
+#SBATCH --job-name=indra_predicate_detector
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:v100-pcie:1
+#SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
 #SBATCH --time=8:00:00
-#SBATCH --output=indra_pred_detector_train_%j.out
-#SBATCH --error=indra_pred_detector_train_%j.err
+#SBATCH --output=indra_predicate_detector_%j.out
+#SBATCH --error=indra_predicate_detector_%j.err
 
 module load cuda/12.3.0
 module load anaconda3/2024.06
@@ -14,18 +14,50 @@ module load anaconda3/2024.06
 cd /home/hy.lim/indra_bert
 export CUDA_VISIBLE_DEVICES=0
 export WANDB_DISABLED=true
-export TOKENIZERS_PARALLELISM=true
 
 eval "$(conda shell.bash hook)"
 conda activate indra
 
+CACHE_DIR=output/predicate_detector/cached_dataset
+if [[ "${REBUILD_CACHE:-0}" == "1" ]]; then
+  rm -rf "${CACHE_DIR}"
+fi
+
 python -m indra_bert.indra_predicate_detector.train \
-    --train-data data/train/predicate_detection_data/llm_annotated/llm_annotated_benchmark_stratified_filtered.jsonl \
-    --output-dir output/predicate_detector \
-    --model-name bert-base-uncased \
-    --num-epochs 10 \
-    --batch-size 16 \
-    --val-ratio 0.1 \
-    --max-seq-length 256 \
-    --learning-rate 5e-5 \
-    --debug-examples 3
+    --dataset_path data/train/event_trigger_data/event_trigger_dataset_combined_simplified.tsv \
+    --output_dir output/predicate_detector \
+    --model_name microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract \
+    --epochs 10 \
+    --batch_size 8 \
+    --learning_rate 2e-5 \
+    --save_total_limit 1 \
+    --use_cached_dataset
+
+python - <<'PY'
+from indra_bert.indra_predicate_detector import PredicateDetector
+
+detector = PredicateDetector('output/predicate_detector')
+example = '<e>EGF</e> activates EGFR resulting in increased ERK signaling.'
+print('\nSample inference:')
+result = detector.predict(example)
+print(f"Triggers: {result['triggers']}")
+print(f"Annotated: {result['annotated_text']}")
+PY
+
+python - <<'PY'
+from huggingface_hub import upload_folder
+
+repo_id = "thomaslim/indra_bert_indra_predicate_detector"
+folder_path = "output/predicate_detector"
+ignore_patterns = ["checkpoint-*", "cached_dataset", "cached_dataset/*"]
+
+print("\nUploading trained model to Hugging Face Hub...")
+upload_folder(
+    repo_id=repo_id,
+    folder_path=folder_path,
+    commit_message="Update INDRA predicate detector",
+    ignore_patterns=ignore_patterns,
+)
+print("Upload complete.")
+PY
+

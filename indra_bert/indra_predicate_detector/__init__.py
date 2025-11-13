@@ -1,3 +1,4 @@
-"""Predicate detector package."""
+from .inference import PredicateDetector
 
-from .inference import PredicateDetector  # noqa: F401
+__all__ = ['PredicateDetector']
+

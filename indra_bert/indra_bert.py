@@ -39,7 +39,7 @@ PTM_STMT_TYPES = {
 GATE2_TO_INDRA_TYPE = {
     # BioRED labels
     # Association: generic, non-directional relatedness.
-    "Association": ["PTM"],
+    "Association": ["PTM", "Activation", "Inhibition", "IncreaseAmount", "DecreaseAmount"],
     # Bind: physical binding / complex formation between entities.
     "Bind": ["Complex"],
     # Comparison: comparative statement linking two entities (e.g., higher/lower).
@@ -51,9 +51,9 @@ GATE2_TO_INDRA_TYPE = {
     # Drug_Interaction: pharmacologic or biochemical interaction between drugs and proteins.
     "Drug_Interaction": [],
     # Negative_Correlation: entities covary inversely in text.
-    "Negative_Correlation": ["PTM"],
+    "Negative_Correlation": ["PTM", "Inhibition", "DecreaseAmount"],
     # Positive_Correlation: entities covary positively in text.
-    "Positive_Correlation": ["PTM"],
+    "Positive_Correlation": ["PTM", "Activation", "IncreaseAmount"],
 
     # BC5CDR labels
     # CID: chemical-induced disease relationship.
@@ -396,16 +396,18 @@ class IndraStructuredExtractor:
             gate2_type_candidates = GATE2_TO_INDRA_TYPE.get(gate2_prediction_effective, [])
             stmt_type = None
 
-            if "PTM" in gate2_type_candidates:
+            # First check if gate3_prediction is directly in the candidates
+            if gate2_type_candidates and gate3_prediction in gate2_type_candidates:
+                stmt_type = gate3_prediction
+            # If not, but "PTM" is in candidates, check if it's a PTM type
+            elif "PTM" in gate2_type_candidates:
                 if gate3_prediction in PTM_STMT_TYPES:
                     stmt_type = gate3_prediction
                 else:
                     continue
+            # Otherwise, use the first candidate if available
             elif gate2_type_candidates:
-                if gate3_prediction in gate2_type_candidates:
-                    stmt_type = gate3_prediction
-                else:
-                    stmt_type = gate2_type_candidates[0]
+                stmt_type = gate2_type_candidates[0]
             else:
                 continue
 

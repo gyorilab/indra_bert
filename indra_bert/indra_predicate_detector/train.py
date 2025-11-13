@@ -1,315 +1,306 @@
-"""Training script for the predicate detector."""
-
-from __future__ import annotations
-
+from datetime import datetime
 import argparse
-import json
-import random
 from pathlib import Path
-from typing import Dict, List, Tuple
 
 import numpy as np
-import torch
-from torch.utils.data import Dataset
+from datasets import Dataset, DatasetDict
 from transformers import (
-    AutoModelForTokenClassification,
     AutoTokenizer,
-    DataCollatorForTokenClassification,
+    AutoModelForTokenClassification,
+    AutoConfig,
     Trainer,
     TrainingArguments,
+    DataCollatorForTokenClassification,
 )
+from typing import Any, Dict, List
+import torch
+from functools import partial
 
 from .preprocess import (
-    RawPredicateExample,
-    ID2LABEL,
-    LABEL2ID,
-    load_and_preprocess_raw_data,
-    preprocess_examples_for_model,
+    load_tsv_dataset,
+    build_label_mappings,
+    preprocess_examples,
 )
-from .postprocess import spans_from_offsets
+from .postprocess import extract_trigger_spans_from_encoding
 
 
 class DataCollatorWithDebug(DataCollatorForTokenClassification):
-    """Data collator that prints a few token/label examples for inspection."""
-
-    def __init__(self, tokenizer, id2label, max_examples_to_print: int = 3, **kwargs):
+    def __init__(self, tokenizer, id2label, max_examples_to_print=1, **kwargs):
         super().__init__(tokenizer, **kwargs)
         self.tokenizer = tokenizer
         self.id2label = id2label
+        self.counter = 0
         self.max_examples_to_print = max_examples_to_print
-        self._printed = 0
 
-    def __call__(self, features: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         batch = super().__call__(features)
 
-        if self._printed >= self.max_examples_to_print:
-            return batch
+        if self.counter < self.max_examples_to_print:
+            for i in range(min(len(features), self.max_examples_to_print - self.counter)):
+                input_ids = batch["input_ids"][i]
+                labels = batch["labels"][i]
+                attention_mask = batch["attention_mask"][i]
 
-        for idx in range(min(len(features), self.max_examples_to_print - self._printed)):
-            input_ids = batch["input_ids"][idx]
-            labels = batch["labels"][idx]
-            attention_mask = batch["attention_mask"][idx]
-            token_type_ids = batch.get("token_type_ids")
+                tokens = self.tokenizer.convert_ids_to_tokens(input_ids)
+                label_names = [
+                    self.id2label.get(l.item(), "IGN") if l.item() != -100 else "PAD"
+                    for l in labels
+                ]
 
-            tokens = self.tokenizer.convert_ids_to_tokens(input_ids.tolist())
-            label_names = [
-                self.id2label.get(lbl.item(), "IGN") if lbl.item() != -100 else "PAD"
-                for lbl in labels
-            ]
+                print("\n--- DEBUG: Training Example ---")
+                print(f"{'Token':20} {'Label':20} {'AttnMask':9}")
+                print("-" * 60)
+                for j, tok in enumerate(tokens):
+                    attn = attention_mask[j].item()
+                    label = label_names[j]
+                    print(f"{tok:20} {label:20} {attn:<9}")
+                print("-" * 60)
 
-            print("\n--- Predicate Detector Training Example ---")
-            print("token\t\tlabel\tattn\ttype")
-            for j, token in enumerate(tokens):
-                attn = attention_mask[j].item()
-                label = label_names[j]
-                ttype = token_type_ids[idx][j].item() if token_type_ids is not None else "-"
-                print(f"{token:15}\t{label:8}\t{attn}\t{ttype}")
-            print("-" * 50)
-
-            self._printed += 1
-            if self._printed >= self.max_examples_to_print:
-                break
+            self.counter += len(features)
 
         return batch
 
 
-class TokenClassificationDataset(Dataset):
-    """Simple torch Dataset wrapping tokenised inputs."""
+def compute_metrics_span_level(eval_preds, id2label, examples):
+    """
+    Compute span-level metrics for trigger detection.
+    Evaluates (trigger_span, role) tuples as the unit of prediction.
+    """
+    predictions = eval_preds.predictions
+    labels = eval_preds.label_ids
 
-    def __init__(self, encoding_dict: dict[str, list]):
-        self.encoding = encoding_dict
-        self.keys = [
-            key
-            for key in encoding_dict.keys()
-            if key in {"input_ids", "attention_mask", "token_type_ids", "labels"}
-        ]
+    TP, FP, FN = 0, 0, 0
 
-    def __len__(self) -> int:
-        return len(self.encoding["input_ids"])
+    for i in range(len(predictions)):
+        pred_ids = np.argmax(predictions[i], axis=1).tolist()
+        gold_ids = labels[i].tolist()
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        item = {
-            key: torch.tensor(self.encoding[key][idx])
-            for key in self.keys
-            if key != "labels"
+        example = examples[i]
+        tokens = example["tokens"]
+        offsets = example["offset_mapping"]
+        text = example["text"]
+
+        # Extract predicted spans with roles
+        pred_spans = extract_trigger_spans_from_encoding(
+            tokens, offsets, pred_ids, id2label, text
+        )
+        # Create set of (start, end, role) tuples for matching
+        pred_tuples = {
+            (s["start"], s["end"], s.get("role"))
+            for s in pred_spans
         }
-        labels = torch.tensor(self.encoding["labels"][idx], dtype=torch.long)
-        if "attention_mask" in item:
-            mask = item["attention_mask"].bool()
-            labels = labels.clone()
-            labels[~mask] = -100
-        item["labels"] = labels
-        return item
 
+        # Extract gold spans with roles
+        gold_spans = extract_trigger_spans_from_encoding(
+            tokens, offsets, gold_ids, id2label, text
+        )
+        gold_tuples = {
+            (s["start"], s["end"], s.get("role"))
+            for s in gold_spans
+        }
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the predicate detector")
-    parser.add_argument(
-        "--train-data",
-        type=Path,
-        required=True,
-        help="Path to the filtered JSONL training file",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        required=True,
-        help="Directory where the trained model and artefacts are stored",
-    )
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        default="bert-base-uncased",
-        help="Base encoder model to fine-tune",
-    )
-    parser.add_argument(
-        "--val-ratio",
-        type=float,
-        default=0.1,
-        help="Fraction of data used for validation",
-    )
-    parser.add_argument(
-        "--num-epochs",
-        type=int,
-        default=3,
-        help="Number of training epochs",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=16,
-        help="Per-device batch size",
-    )
-    parser.add_argument(
-        "--learning-rate",
-        type=float,
-        default=5e-5,
-        help="Initial learning rate",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility",
-    )
-    parser.add_argument(
-        "--max-seq-length",
-        type=int,
-        default=256,
-        help="Maximum sequence length for tokenization",
-    )
-    parser.add_argument(
-        "--debug-examples",
-        type=int,
-        default=3,
-        help="Number of tokenised examples to print for debugging",
-    )
-    return parser.parse_args()
+        TP += len(pred_tuples & gold_tuples)
+        FP += len(pred_tuples - gold_tuples)
+        FN += len(gold_tuples - pred_tuples)
 
-
-def split_train_val(
-    examples: List[RawPredicateExample],
-    val_ratio: float,
-    seed: int,
-) -> Tuple[List[RawPredicateExample], List[RawPredicateExample]]:
-    if not 0 <= val_ratio < 1:
-        raise ValueError("val_ratio must be in [0, 1)")
-    examples = list(examples)
-    random.Random(seed).shuffle(examples)
-    val_size = int(len(examples) * val_ratio)
-    val_examples = examples[:val_size]
-    train_examples = examples[val_size:]
-    return train_examples, val_examples
-
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def compute_metrics_span_level(pred_output, eval_dataset: TokenClassificationDataset):
-    if "offset_mapping" not in eval_dataset.encoding or "text" not in eval_dataset.encoding:
-        return {}
-
-    predictions = pred_output.predictions.argmax(axis=-1)
-    label_ids = pred_output.label_ids
-
-    offsets_list = eval_dataset.encoding["offset_mapping"]
-    texts = eval_dataset.encoding["text"]
-
-    tp = fp = fn = 0
-
-    for idx, (pred_seq, gold_seq) in enumerate(zip(predictions, label_ids)):
-        mask = gold_seq != -100
-        pred_seq = pred_seq[mask]
-        gold_seq = gold_seq[mask]
-
-        offsets = offsets_list[idx]
-        offsets = [offsets[j] for j, flag in enumerate(mask) if flag]
-        text = texts[idx]
-
-        pred_spans = set(spans_from_offsets(offsets, pred_seq.tolist(), text))
-        gold_spans = set(spans_from_offsets(offsets, gold_seq.tolist(), text))
-
-        tp += len(pred_spans & gold_spans)
-        fp += len(pred_spans - gold_spans)
-        fn += len(gold_spans - pred_spans)
-
-    precision = tp / (tp + fp + 1e-8)
-    recall = tp / (tp + fn + 1e-8)
+    precision = TP / (TP + FP + 1e-8)
+    recall = TP / (TP + FN + 1e-8)
     f1 = 2 * precision * recall / (precision + recall + 1e-8)
 
     return {"precision": precision, "recall": recall, "f1": f1}
 
 
-def main() -> None:
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train predicate detector model")
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        required=True,
+        help="Path to TSV dataset file",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        required=True,
+        help="Directory to save trained model",
+    )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="bert-base-uncased",
+        help="Pretrained model name or path",
+    )
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--learning_rate", type=float, default=2e-5)
+    parser.add_argument("--max_length", type=int, default=512)
+    parser.add_argument("--use_cached_dataset", action="store_true")
+    parser.add_argument("--save_total_limit", type=int, default=3, help="Maximum number of checkpoints to keep")
+    parser.add_argument("--version", type=str, default="1.0", help="Version of the training script")
+    return parser.parse_args()
+
+
+def main():
     args = parse_args()
-    set_seed(args.seed)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_path = Path(args.dataset_path)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_examples = load_and_preprocess_raw_data(args.train_data)
-    train_examples, val_examples = split_train_val(raw_examples, args.val_ratio, args.seed)
+    cache_dataset_path = output_dir / "cached_dataset"
+    cache_label2id_path = cache_dataset_path / "label2id.json"
 
+    # Load tokenizer and add special tokens
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.add_special_tokens({"additional_special_tokens": ["<e>", "</e>"]})
 
-    train_encoding = preprocess_examples_for_model(
-        train_examples,
-        tokenizer,
-        max_length=args.max_seq_length,
-        padding=False,
-        truncation=True,
-    )
-    val_encoding = None
-    if val_examples:
-        val_encoding = preprocess_examples_for_model(
-            val_examples,
-            tokenizer,
-            max_length=args.max_seq_length,
-            padding=False,
-            truncation=True,
+    if args.use_cached_dataset and cache_dataset_path.exists() and cache_label2id_path.exists():
+        print("Loading from cache...")
+        import json
+        cached = DatasetDict.load_from_disk(str(cache_dataset_path))
+        train_dataset = cached["train"]
+        val_dataset = cached["validation"]
+        test_dataset = cached["test"]
+        with open(cache_label2id_path, "r") as f:
+            label2id = json.load(f)
+        id2label = {int(k): v for k, v in json.load(open(cache_dataset_path / "id2label.json")).items()}
+    else:
+        print("No cache found, processing dataset...")
+        # Load raw data
+        print(f"Loading dataset from {dataset_path}...")
+        raw_examples = load_tsv_dataset(dataset_path)
+        print(f"Total examples: {len(raw_examples)}")
+
+        # Build label mappings
+        print("Building label mappings...")
+        label2id, id2label = build_label_mappings(raw_examples)
+        print(f"Labels: {list(label2id.keys())}")
+
+        # Convert to HuggingFace Dataset
+        dataset = Dataset.from_list(raw_examples)
+
+        # Split dataset: 70% train, 20% val, 10% test
+        print("Splitting dataset...")
+        split_dataset = dataset.train_test_split(test_size=0.3, seed=42)
+        train_dataset = split_dataset["train"]
+        temp_dataset = split_dataset["test"]
+        val_test_split = temp_dataset.train_test_split(test_size=1/3, seed=42)
+        val_dataset = val_test_split["train"]
+        test_dataset = val_test_split["test"]
+
+        print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
+
+        # Preprocess datasets
+        print("Preprocessing datasets...")
+        preprocess_fn = partial(preprocess_examples, tokenizer=tokenizer, label2id=label2id)
+
+        train_dataset = train_dataset.map(
+            lambda x: preprocess_fn(x),
+            batched=False
+        )
+        val_dataset = val_dataset.map(
+            lambda x: preprocess_fn(x),
+            batched=False
+        )
+        test_dataset = test_dataset.map(
+            lambda x: preprocess_fn(x),
+            batched=False
         )
 
-    train_dataset = TokenClassificationDataset(train_encoding)
-    eval_dataset = TokenClassificationDataset(val_encoding) if val_encoding else None
+        # Save cache
+        if args.use_cached_dataset:
+            print("Caching preprocessed datasets...")
+            cache_dataset_path.mkdir(parents=True, exist_ok=True)
+            import json
+            cached = DatasetDict(train=train_dataset, validation=val_dataset, test=test_dataset)
+            cached.save_to_disk(str(cache_dataset_path))
+            with open(cache_label2id_path, "w") as f:
+                json.dump(label2id, f, indent=2)
+            with open(cache_dataset_path / "id2label.json", "w") as f:
+                json.dump({str(k): v for k, v in id2label.items()}, f, indent=2)
+
+    dataset_dict = DatasetDict({"train": train_dataset, "validation": val_dataset})
+
+    # Load model
+    training_config = vars(args).copy()
+    training_config['time_created'] = datetime.now().strftime("%Y-%m-%d")
+    config = AutoConfig.from_pretrained(args.model_name)
+    config.num_labels = len(label2id)
+    config.id2label = id2label
+    config.label2id = label2id
+    config.training_config = training_config
 
     model = AutoModelForTokenClassification.from_pretrained(
-        args.model_name,
-        num_labels=len(LABEL2ID),
-        id2label=ID2LABEL,
-        label2id=LABEL2ID,
+        args.model_name, config=config
     )
+    # Resize token embeddings to account for new special tokens
     model.resize_token_embeddings(len(tokenizer))
 
+    # Data collator
+    data_collator = DataCollatorWithDebug(
+        tokenizer=tokenizer,
+        id2label=id2label,
+        padding=True,
+    )
+
+    # Prepare eval examples for span-level metrics
+    # Extract examples from validation dataset once
+    # Use annotated_text (with <e> tags) since offsets are relative to that
+    eval_examples_for_metrics = []
+    for i in range(len(dataset_dict["validation"])):
+        example = dataset_dict["validation"][i]
+        eval_examples_for_metrics.append({
+            "tokens": example["tokens"],
+            "offset_mapping": example["offset_mapping"],
+            "text": example["annotated_text"],  # Use annotated_text since offsets are relative to it
+        })
+    
+    # Metrics function - only span-level metrics based on (trigger_span, role) tuples
+    def compute_metrics(p):
+        # Compute span-level metrics using (span, role) tuples
+        span_metrics = compute_metrics_span_level(p, id2label, eval_examples_for_metrics)
+        
+        return span_metrics
+
+    # Training arguments
     training_args = TrainingArguments(
-        output_dir=str(args.output_dir / "checkpoints"),
-        num_train_epochs=args.num_epochs,
+        output_dir=str(output_dir),
+        num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         weight_decay=0.01,
-        eval_strategy="epoch" if eval_dataset is not None else "no",
+        logging_dir=str(output_dir / "logs"),
+        logging_steps=100,
+        eval_strategy="epoch",
         save_strategy="epoch",
-        save_total_limit=2,
-        load_best_model_at_end=eval_dataset is not None,
+        load_best_model_at_end=True,
         metric_for_best_model="f1",
         greater_is_better=True,
-        logging_steps=50,
-        seed=args.seed,
-        report_to=[],
+        save_total_limit=args.save_total_limit,
     )
 
-    data_collator = DataCollatorWithDebug(
-        tokenizer=tokenizer,
-        id2label=ID2LABEL,
-        max_examples_to_print=args.debug_examples,
-    )
-
+    # Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        tokenizer=tokenizer,
+        train_dataset=dataset_dict["train"],
+        eval_dataset=dataset_dict["validation"],
         data_collator=data_collator,
-        compute_metrics=(
-            lambda output: compute_metrics_span_level(output, eval_dataset)
-            if eval_dataset is not None
-            else None
-        ),
+        compute_metrics=compute_metrics,
     )
 
+    # Train
+    print("Starting training...")
     trainer.train()
 
-    trainer.save_model(str(args.output_dir))
-    tokenizer.save_pretrained(str(args.output_dir))
+    # Save model
+    print(f"Saving model to {output_dir}...")
+    trainer.save_model()
+    tokenizer.save_pretrained(output_dir)
 
-    with (args.output_dir / "training_config.json").open("w", encoding="utf-8") as fh:
-        json.dump(vars(args), fh, indent=2, default=str)
+    print("Training complete!")
 
 
 if __name__ == "__main__":
     main()
+
