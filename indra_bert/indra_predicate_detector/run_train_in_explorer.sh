@@ -47,9 +47,9 @@ PY
 python - <<'PY'
 from huggingface_hub import upload_folder
 
-repo_id = "thomaslim/indra_bert_indra_predicate_detector"
+repo_id = "thomaslim6793/indra_bert_predicate_detector"
 folder_path = "output/predicate_detector"
-ignore_patterns = ["checkpoint-*", "cached_dataset", "cached_dataset/*"]
+ignore_patterns = ["checkpoint-*", "checkpoints", "checkpoints/*", "cached_dataset", "cached_dataset/*", "logs", "logs/*"]
 
 print("\nUploading trained model to Hugging Face Hub...")
 upload_folder(

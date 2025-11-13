@@ -135,7 +135,6 @@ def parse_args():
     parser.add_argument("--learning_rate", type=float, default=2e-5)
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--use_cached_dataset", action="store_true")
-    parser.add_argument("--save_total_limit", type=int, default=3, help="Maximum number of checkpoints to keep")
     parser.add_argument("--version", type=str, default="1.0", help="Version of the training script")
     return parser.parse_args()
 

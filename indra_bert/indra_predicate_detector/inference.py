@@ -1,17 +1,40 @@
 from transformers import AutoTokenizer, AutoModelForTokenClassification
 import torch
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import re
+from pathlib import Path
+from huggingface_hub import snapshot_download
 
 from .postprocess import extract_trigger_spans_from_encoding
 
 
 class PredicateDetector:
-    def __init__(self, model_path: str):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+    def __init__(self, model_path: Optional[str] = None):
+        """
+        Initialize PredicateDetector.
+        
+        Args:
+            model_path: Path to model directory or HuggingFace repo ID. 
+                       Defaults to "thomaslim6793/indra_bert_predicate_detector"
+        """
+        if model_path is None:
+            model_path = "thomaslim6793/indra_bert_predicate_detector"
+        
+        # Handle both local paths and HuggingFace repo IDs
+        candidate_path = Path(model_path)
+        if candidate_path.exists():
+            pretrained_source = str(candidate_path.resolve())
+        else:
+            snapshot_path = snapshot_download(repo_id=str(model_path), repo_type="model")
+            pretrained_source = snapshot_path
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(pretrained_source)
         # Add special tokens (idempotent - won't add if already present)
-        self.tokenizer.add_special_tokens({"additional_special_tokens": ["<e>", "</e>"]})
-        self.model = AutoModelForTokenClassification.from_pretrained(model_path)
+        num_added = self.tokenizer.add_special_tokens({"additional_special_tokens": ["<e>", "</e>"]})
+        self.model = AutoModelForTokenClassification.from_pretrained(pretrained_source)
+        # Resize embeddings if special tokens were added
+        if num_added > 0:
+            self.model.resize_token_embeddings(len(self.tokenizer))
         self.id2label = self.model.config.id2label
         self.label2id = self.model.config.label2id
 
