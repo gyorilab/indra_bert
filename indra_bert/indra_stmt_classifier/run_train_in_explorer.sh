@@ -26,14 +26,16 @@ fi
 python -m indra_bert.indra_stmt_classifier.train \
     --relation_path data/train/statement_classification/combined/relation_binary.jsonl \
     --indra_path data/train/indra_benchmark_annotated_data/indra_benchmark_corpus_annotated_stratified_sample_2000_with_heuristic_filtered_negatives.jsonl \
+    --hrt_path data/train/event_trigger_data/event_trigger_dataset_combined_hrt.tsv \
     --output_dir output/indra_stmt_classifier \
     --epochs 10 \
     --train_batch_size 32 \
     --eval_batch_size 32 \
     --learning_rate 3e-5 \
     --gate1_loss_weight 1.0 \
-    --gate2_loss_weight 0.5 \
-    --gate3_loss_weight 0.25 \
+    --gate2_loss_weight 1.0 \
+    --gate3_loss_weight 1.0 \
+    --gate4_loss_weight 1.0 \
     --eval_strategy epoch \
     --cache_dir "${CACHE_DIR}" \
     --use_cached_dataset

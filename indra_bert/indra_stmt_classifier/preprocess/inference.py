@@ -12,7 +12,8 @@ def preprocess_for_inference(text: str, tokenizer: AutoTokenizer):
         return_tensors="pt",
         truncation=True,
         max_length=512,
-        padding="longest",
+        padding=False,
+        return_offsets_mapping=True,
     )
 
 
@@ -23,5 +24,6 @@ def preprocess_for_inference_batch(texts: List[str], tokenizer: AutoTokenizer, m
         padding="longest",
         truncation=True,
         max_length=max_length,
+        return_offsets_mapping=True,
         return_tensors="pt",
     )

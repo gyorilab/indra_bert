@@ -14,6 +14,11 @@ from .gate3 import (
     build_indra_label_mapping,
     tokenize_indra_dataset,
 )
+from .gate4 import (
+    load_hrt_dataset,
+    build_gate4_label_mapping,
+    tokenize_hrt_dataset,
+)
 from .inference import (
     preprocess_for_inference,
     preprocess_for_inference_batch,
@@ -30,6 +35,9 @@ __all__ = [
     "load_indra_benchmark_dataset",
     "build_indra_label_mapping",
     "tokenize_indra_dataset",
+    "load_hrt_dataset",
+    "build_gate4_label_mapping",
+    "tokenize_hrt_dataset",
     "preprocess_for_inference",
     "preprocess_for_inference_batch",
 ]
