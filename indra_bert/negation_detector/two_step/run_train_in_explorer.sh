@@ -18,14 +18,14 @@ export WANDB_DISABLED=true
 eval "$(conda shell.bash hook)"
 conda activate indra
 
-CACHE_DIR=output/negation_detector_two_step/cached_dataset
+CACHE_DIR=output/negation_detector/cached_dataset
 if [[ "${REBUILD_CACHE:-0}" == "1" ]]; then
   rm -rf "${CACHE_DIR}"
 fi
 
 python -m indra_bert.negation_detector.two_step.train \
     --data_path data/train/negation_data/combined_negation_dataset.json \
-    --output_dir output/negation_detector_two_step \
+    --output_dir output/negation_detector \
     --model_name microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract \
     --epochs 10 \
     --train_batch_size 16 \
@@ -40,7 +40,7 @@ python -m indra_bert.negation_detector.two_step.train \
 python - <<'PY'
 from indra_bert.negation_detector.two_step import NegationDetector
 
-detector = NegationDetector('output/negation_detector_two_step')
+detector = NegationDetector('output/negation_detector')
 print('\nSample inference:')
 examples = [
     "The treatment did not improve patient outcomes.",
@@ -68,8 +68,8 @@ PY
 python - <<'PY'
 from huggingface_hub import upload_folder
 
-repo_id = "thomaslim6793/indra_bert_negation_detector_two_step"
-folder_path = "output/negation_detector_two_step"
+repo_id = "thomaslim6793/indra_bert_negation_detector"
+folder_path = "output/negation_detector"
 ignore_patterns = ["cue_checkpoint", "scope_checkpoint", "cached_dataset", "cached_dataset/*"]
 
 print("\nUploading trained model to Hugging Face Hub...")
