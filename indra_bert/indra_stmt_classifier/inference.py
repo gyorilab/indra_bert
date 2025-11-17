@@ -208,10 +208,13 @@ class IndraStmtClassifier:
             result = {
                 "gate1_prediction": gate1_label,
                 "gate1_probs": gate1_prob_map,
+                "gate1_probability": gate1_prob_map.get(gate1_label, 0.0),
                 "gate2_prediction": subtype_label,
                 "gate2_probs": gate2_prob_map,
+                "gate2_probability": gate2_prob_map.get(subtype_label, 0.0),
                 "gate3_prediction": indra_label,
                 "gate3_probs": gate3_prob_map,
+                "gate3_probability": gate3_prob_map.get(indra_label, 0.0),
             }
             
             # Extract predicate spans from gate4 if available
