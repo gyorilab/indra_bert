@@ -85,7 +85,7 @@ GATE2_TO_INDRA_TYPE = {
 
 GATE1_HAS_RELATION_THRESHOLD = 0.45
 GATE2_NO_RELATION_THRESHOLD = 0.9
-GATE3_CONF_THRESHOLD = 0.8
+GATE3_CONF_THRESHOLD = 0.9
 
 
 def _span_contains(outer_span: dict, inner_span: dict) -> bool:
