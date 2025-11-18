@@ -25,37 +25,73 @@ class NegationDetector:
         Initialize the negation detector.
         
         Args:
-            model_path: Path to the trained model directory
+            model_path: Path to the trained model directory or HuggingFace repo ID
         """
-        self.model_path = Path(model_path)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        from huggingface_hub import snapshot_download
         
-        # Load label mappings
-        label_path = self.model_path / "cue_label2id.json"
-        if not label_path.exists():
-            label_path = self.model_path.parent / "cue_label2id.json"
-        
-        if label_path.exists():
-            with open(label_path, "r") as f:
-                self.cue_label2id = json.load(f)
+        # Handle HuggingFace repo IDs
+        candidate_path = Path(model_path)
+        if candidate_path.exists():
+            self.model_path = candidate_path.resolve()
+            pretrained_source = str(self.model_path)
         else:
-            # Fallback: try cached_dataset
-            cached_label_path = self.model_path.parent / "cached_dataset" / "cue_label2id.json"
-            if cached_label_path.exists():
-                with open(cached_label_path, "r") as f:
+            # Try HuggingFace Hub
+            try:
+                snapshot_path = snapshot_download(repo_id=str(model_path), repo_type="model")
+                self.model_path = Path(snapshot_path)
+                pretrained_source = snapshot_path
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Model path '{model_path}' not found locally and not a valid HuggingFace repo: {e}"
+                )
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(pretrained_source)
+        
+        # Load label mappings - check multiple possible locations
+        label_paths = [
+            self.model_path / "cue_label2id.json",
+            self.model_path.parent / "cue_label2id.json",
+            self.model_path.parent / "cached_dataset" / "cue_label2id.json",
+        ]
+        
+        self.cue_label2id = None
+        for label_path in label_paths:
+            if label_path.exists():
+                with open(label_path, "r") as f:
                     self.cue_label2id = json.load(f)
-            else:
-                raise FileNotFoundError(f"Could not find cue_label2id.json")
+                break
+        
+        if self.cue_label2id is None:
+            # Try downloading directly from HuggingFace if it's a repo ID
+            if "thomaslim6793" in str(model_path) or "/" in str(model_path):
+                try:
+                    from huggingface_hub import hf_hub_download
+                    label_file_path = hf_hub_download(
+                        repo_id=str(model_path),
+                        filename="cue_label2id.json",
+                        repo_type="model"
+                    )
+                    with open(label_file_path, "r") as f:
+                        self.cue_label2id = json.load(f)
+                except Exception as e:
+                    pass  # Will raise error below if still None
+        
+        if self.cue_label2id is None:
+            raise FileNotFoundError(
+                f"Could not find cue_label2id.json. "
+                f"Model path: {self.model_path}, "
+                f"Checked: {[str(p) for p in label_paths]}"
+            )
         
         self.cue_id2label = {v: k for k, v in self.cue_label2id.items()}
         
         # Load model config
-        config = AutoConfig.from_pretrained(model_path)
+        config = AutoConfig.from_pretrained(pretrained_source)
         config.cue_num_labels = len(self.cue_label2id)
         
         # Initialize model
         self.model = NegationDetectorModel.from_pretrained(
-            model_path,
+            pretrained_source,
             config=config,
             cue_num_labels=len(self.cue_label2id),
         )

@@ -12,6 +12,7 @@ from .indra_stmt_classifier.inference import IndraStmtClassifier
 from .indra_agent_role_assigner.inference import IndraAgentsTagger
 from .agent_mutation_detector.inference import AgentMutationDetector
 from .ptm_site_extractor.inference import PTMSiteExtractor
+from .negation_detector.two_step import NegationDetector
 from .utils.annotate import annotate_entities
 from .utils.semantic_type_filter import TypeConstraintConfig, filter_statements_by_type_constraints
 from .utils.parse_mutation import convert_to_indra_mutations
@@ -87,6 +88,112 @@ GATE2_NO_RELATION_THRESHOLD = 0.9
 GATE3_CONF_THRESHOLD = 0.8
 
 
+def _span_contains(outer_span: dict, inner_span: dict) -> bool:
+    """
+    Check if outer_span contains inner_span.
+    
+    Args:
+        outer_span: Dict with 'start' and 'end' keys
+        inner_span: Dict with 'start' and 'end' keys
+    
+    Returns:
+        True if inner_span is completely within outer_span
+    """
+    outer_start = outer_span.get('start')
+    outer_end = outer_span.get('end')
+    inner_start = inner_span.get('start')
+    inner_end = inner_span.get('end')
+    
+    if None in (outer_start, outer_end, inner_start, inner_end):
+        return False
+    
+    return outer_start <= inner_start and inner_end <= outer_end
+
+
+def _count_negation_nesting_level(predicate_span: dict, negations: List[dict]) -> int:
+    """
+    Count the nesting level of negations around a predicate span.
+    
+    Recursively checks how many negation scopes contain the predicate span,
+    accounting for nested negations (double negation cancels out).
+    
+    Algorithm:
+    1. Find all scopes that contain the predicate
+    2. Build a nesting tree: for each scope, count how many other scopes contain it
+    3. The nesting level is the maximum depth in this tree
+    
+    Args:
+        predicate_span: Dict with 'start' and 'end' keys for the predicate
+        negations: List of negation dicts, each with 'cue' and 'scope' keys
+    
+    Returns:
+        Nesting level (0 = not negated, 1 = negated, 2 = double negation = not negated, etc.)
+    """
+    if not predicate_span or not negations:
+        return 0
+    
+    # Filter negations that have valid scopes
+    valid_negations = [
+        neg for neg in negations 
+        if neg.get('scope') is not None and 
+           neg['scope'].get('start') is not None and 
+           neg['scope'].get('end') is not None
+    ]
+    
+    if not valid_negations:
+        return 0
+    
+    # Find all negation scopes that contain the predicate span
+    containing_scopes = []
+    for neg in valid_negations:
+        scope = neg['scope']
+        if _span_contains(scope, predicate_span):
+            containing_scopes.append(scope)
+    
+    if not containing_scopes:
+        return 0
+    
+    # Build nesting tree: for each scope, find its parent (the scope that contains it)
+    # Then count the maximum depth
+    def get_nesting_depth(scope, all_scopes):
+        """Recursively calculate nesting depth of a scope."""
+        # Find all scopes that contain this scope
+        parents = [s for s in all_scopes if s != scope and _span_contains(s, scope)]
+        if not parents:
+            return 1  # Top-level scope
+        
+        # Return 1 + max depth of all parents
+        return 1 + max(get_nesting_depth(parent, all_scopes) for parent in parents)
+    
+    # Calculate maximum nesting depth across all containing scopes
+    max_depth = max(get_nesting_depth(scope, containing_scopes) for scope in containing_scopes)
+    
+    return max_depth
+
+
+def _is_predicate_negated(predicate_spans: List[dict], negations: List[dict]) -> bool:
+    """
+    Check if any predicate span is negated based on negation nesting.
+    
+    Args:
+        predicate_spans: List of predicate span dicts with 'start' and 'end' keys
+        negations: List of negation dicts with 'cue' and 'scope' keys
+    
+    Returns:
+        True if any predicate is negated (odd nesting level), False otherwise
+    """
+    if not predicate_spans:
+        return False
+    
+    for predicate_span in predicate_spans:
+        nesting_level = _count_negation_nesting_level(predicate_span, negations)
+        # Odd nesting level means negated, even means not negated (double negation cancels)
+        if nesting_level % 2 == 1:
+            return True
+    
+    return False
+
+
 def _has_required_roles(stmt_type: str, agent_roles: dict) -> bool:
     """Ensure required semantic roles are present before emitting a statement."""
     if not agent_roles:
@@ -120,12 +227,14 @@ class IndraStructuredExtractor:
         role_model_path="thomaslim6793/indra_bert_indra_stmt_agents_role_assigner",
         mutations_model_path="thomaslim6793/indra_bert_agent_mutation_detection",
         ptm_site_model_path="thomaslim6793/indra_bert_ptm_site_extractor",
+        negation_model_path="thomaslim6793/indra_bert_negation_detector",
     ):
         self.ner_model = AgentNERExtractor(ner_model_path)
         self.stmt_model = IndraStmtClassifier(stmt_model_path)
         self.role_model = IndraAgentsTagger(role_model_path)
         self.mutations_model = AgentMutationDetector(mutations_model_path)
         self.ptm_site_model = PTMSiteExtractor(ptm_site_model_path) if ptm_site_model_path else None
+        self.negation_model = NegationDetector(negation_model_path)
 
         self.ner_model_local_path = self._resolve_model_path(ner_model_path, "ner")
         self.stmt_model_local_path = self._resolve_model_path(stmt_model_path, "stmt")
@@ -133,6 +242,7 @@ class IndraStructuredExtractor:
         self.mutations_model_local_path = self._resolve_model_path(mutations_model_path, "mutations")
         if ptm_site_model_path:
             self.ptm_site_model_local_path = self._resolve_model_path(ptm_site_model_path, "ptm_site")
+        self.negation_model_local_path = self._resolve_model_path(negation_model_path, "negation")
 
     def _resolve_model_path(self, model_path, label="model"):
         try:
@@ -152,6 +262,9 @@ class IndraStructuredExtractor:
         stmts = []
         sentences = self.sentence_tokenize(text, mode='nltk')
         for sentence in sentences:
+            # Detect negation at sentence level
+            negation_pred = self.negation_model.predict(sentence)
+            
             entity_preds = self.ner_model.predict(sentence)
             pairs = self.get_entity_pairs(entity_preds)
 
@@ -192,6 +305,10 @@ class IndraStructuredExtractor:
                     'mutations_pred': {
                         'mutations': mutations_pred.get('mutations', {}),
                         'raw_output': mutations_pred
+                    },
+                    'negation_pred': {
+                        'negations': negation_pred.get('negations', []),  # List of {'cue': {...}, 'scope': {...}} pairs
+                        'raw_output': negation_pred
                     }
                 }
                 
@@ -209,95 +326,90 @@ class IndraStructuredExtractor:
     def extract_structured_statements_batch(self, text):
         """Efficiently process multiple texts using batching at each pipeline step."""
         all_statements = []
-
-        # STEP 1: Run NER in batch
+        
+        # Tokenize sentences
         sentences = self.sentence_tokenize(text, mode='nltk')
+        
+        # Batch negation detection and NER for all sentences
+        negation_preds_batch = self.negation_model.predict_batch(sentences)
         ner_preds_batch = self.ner_model.predict_batch(sentences)
-
-        # For each sentence, get entity pairs and prepare annotated texts for classification
-        stmt_inputs = []
-        stmt_pair_info = []
-        for sentence, ner_preds in zip(sentences, ner_preds_batch):
+        
+        # Collect all pairs and their metadata (same structure as iterative version)
+        all_pairs = []
+        all_annotated_texts = []
+        all_sentences = []
+        all_ner_preds = []
+        all_negation_preds = []
+        
+        for sentence, ner_preds, negation_pred in zip(sentences, ner_preds_batch, negation_preds_batch):
             pairs = self.get_entity_pairs(ner_preds)
             for pair in pairs:
                 annotated_text = annotate_entities(sentence, pair)
-                stmt_inputs.append(annotated_text)
-                stmt_pair_info.append((sentence, pair, ner_preds))  # to keep track later
-
-        # STEP 2: Run statement classification in batch
-        if not stmt_inputs:
-            return []
-        stmt_preds_batch = self.stmt_model.predict_batch(stmt_inputs)
-
-        # Filter by confidence and collect inputs for role prediction
-        role_inputs_text = []
-        role_inputs_type = []
-        final_pairs = []
-
-        for i, stmt_pred in enumerate(stmt_preds_batch):
-            stmt_label = stmt_pred.get('gate3_prediction') or "unknown"
-
-            role_inputs_text.append(stmt_inputs[i])
-            role_inputs_type.append(stmt_label)
-            final_pairs.append({
-                "stmt_label": stmt_label,
-                "prediction": stmt_pred,
-                "pair_info": stmt_pair_info[i],
-                "annotated_text": stmt_inputs[i],
-            })
-
-        # STEP 3: Run role assignment in batch
-        role_preds_batch = self.role_model.predict_batch(role_inputs_type, role_inputs_text)
-
-        # STEP 4: Run mutation detection in batch
-        mutations_inputs_pairs = []
-        mutations_inputs_text = []
-        for pair_data in final_pairs:
-            sentence, pair, _ = pair_data["pair_info"]
-            mutations_inputs_pairs.append(list(pair))
-            mutations_inputs_text.append(pair_data["annotated_text"])
+                all_pairs.append(pair)
+                all_annotated_texts.append(annotated_text)
+                all_sentences.append(sentence)
+                all_ner_preds.append(ner_preds)
+                all_negation_preds.append(negation_pred)
         
-        mutations_preds_batch = self.mutations_model.predict_batch(mutations_inputs_pairs, mutations_inputs_text)
-
-        # STEP 5: Run PTM site extraction conditionally for PTM statement types
-        ptm_site_preds_batch = [None] * len(final_pairs)
+        if not all_pairs:
+            return []
+        
+        # Batch statement classification
+        stmt_preds_batch = self.stmt_model.predict_batch(all_annotated_texts)
+        
+        # Collect inputs for role prediction
+        role_inputs_type = []
+        for stmt_pred in stmt_preds_batch:
+            stmt_label = stmt_pred.get('gate3_prediction') or "unknown"
+            role_inputs_type.append(stmt_label)
+        
+        # Batch role assignment
+        role_preds_batch = self.role_model.predict_batch(role_inputs_type, all_annotated_texts)
+        
+        # Batch mutation detection
+        mutations_inputs_pairs = [list(pair) for pair in all_pairs]
+        mutations_preds_batch = self.mutations_model.predict_batch(mutations_inputs_pairs, all_annotated_texts)
+        
+        # Batch PTM site extraction (conditional)
+        ptm_site_preds_batch = [None] * len(all_pairs)
         if self.ptm_site_model:
-            ptm_stmt_indices = []
+            ptm_indices = []
             ptm_inputs_agents = []
             ptm_inputs_text = []
             
-            for i, pair_data in enumerate(final_pairs):
-                stmt_type = pair_data["stmt_label"]
-                if stmt_type in PTM_STMT_TYPES:
-                    # For PTM statements, extract sites from object/substrate agent
-                    # Get object agent from role_pred
-                    role_pred = role_preds_batch[i]
+            for i, (stmt_pred, role_pred) in enumerate(zip(stmt_preds_batch, role_preds_batch)):
+                stmt_label = stmt_pred.get('gate3_prediction') or "unknown"
+                if stmt_label in PTM_STMT_TYPES:
                     object_agents = [r for r in role_pred.get('role_spans', []) 
                                    if r.get('role') in ('object', 'substrate', 'sub')]
-                    
                     if object_agents:
-                        ptm_stmt_indices.append(i)
+                        ptm_indices.append(i)
                         ptm_inputs_agents.append(object_agents)
-                        ptm_inputs_text.append(pair_data["annotated_text"])
+                        ptm_inputs_text.append(all_annotated_texts[i])
             
             if ptm_inputs_agents:
                 ptm_results = self.ptm_site_model.predict_batch(ptm_inputs_agents, ptm_inputs_text)
-                for idx, result in zip(ptm_stmt_indices, ptm_results):
+                for idx, result in zip(ptm_indices, ptm_results):
                     ptm_site_preds_batch[idx] = result
-
-        # STEP 6: Assemble final results
-        for i, (pair_data, role_pred, mutations_pred) in enumerate(zip(
-                final_pairs,
-                role_preds_batch,
-                mutations_preds_batch)):
-            stmt_label = pair_data["stmt_label"]
-            stmt_pred = pair_data["prediction"]
-            text, pair, ner_preds = pair_data["pair_info"]
-
+        
+        # Assemble results (same structure as iterative version)
+        for i in range(len(all_pairs)):
+            sentence = all_sentences[i]
+            pair = all_pairs[i]
+            annotated_text = all_annotated_texts[i]
+            ner_preds = all_ner_preds[i]
+            negation_pred = all_negation_preds[i]
+            stmt_pred = stmt_preds_batch[i]
+            role_pred = role_preds_batch[i]
+            mutations_pred = mutations_preds_batch[i]
+            ptm_sites_pred = ptm_site_preds_batch[i]
+            
+            stmt_label = stmt_pred.get('gate3_prediction') or "unknown"
+            
             stmt = {
-                'original_text': text,
+                'original_text': sentence,
                 'entity_pair': pair,
-                'annotated_text': pair_data["annotated_text"],
+                'annotated_text': annotated_text,
                 'ner_info': {
                     'all_entities': ner_preds.get('entities') or ner_preds.get('entity_spans', []),
                     'entity_pair': pair
@@ -311,18 +423,21 @@ class IndraStructuredExtractor:
                 'mutations_pred': {
                     'mutations': mutations_pred.get('mutations', {}),
                     'raw_output': mutations_pred
+                },
+                'negation_pred': {
+                    'negations': negation_pred.get('negations', []),
+                    'raw_output': negation_pred
                 }
             }
             
-            # Add PTM site predictions if available
-            if ptm_site_preds_batch[i] is not None:
+            if ptm_sites_pred is not None:
                 stmt['ptm_sites_pred'] = {
-                    'sites': ptm_site_preds_batch[i].get('sites', []),
-                    'raw_output': ptm_site_preds_batch[i]
+                    'sites': ptm_sites_pred.get('sites', []),
+                    'raw_output': ptm_sites_pred
                 }
-
+            
             all_statements.append(stmt)
-
+        
         return all_statements
     
     def get_json_indra_stmts(
@@ -369,7 +484,22 @@ class IndraStructuredExtractor:
             gate1_probs = raw_pred.get('gate1_probs') or {}
             gate2_probs = raw_pred.get('gate2_probs') or {}
             gate3_probs = raw_pred.get('gate3_probs') or {}
+            gate4_predicate_spans = raw_pred.get('gate4_predicate_spans', [])  # List of {'start': int, 'end': int, 'text': str}
 
+            # Check if predicate is negated using gate4 spans and negation detection
+            negation_pred = stmt.get('negation_pred', {})
+            negations = negation_pred.get('negations', [])
+            is_negated = _is_predicate_negated(gate4_predicate_spans, negations)
+            
+            # If predicate is negated, skip this statement (no relation)
+            if is_negated:
+                logger.debug(
+                    "Skipping statement due to negated predicate: stmt_type=%s, predicate_spans=%s",
+                    gate3_prediction,
+                    gate4_predicate_spans
+                )
+                continue
+            
             gate1_has_prob = float(gate1_probs.get("has_relation", 0.0))
             gate1_positive = gate1_prediction == "has_relation" or gate1_has_prob >= GATE1_HAS_RELATION_THRESHOLD
             if not gate1_positive:
