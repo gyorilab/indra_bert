@@ -4,6 +4,21 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+PTM_STMT_TYPES = {
+    "Phosphorylation", "Dephosphorylation",
+    "Autophosphorylation", "Transphosphorylation",
+    "Ubiquitination", "Deubiquitination",
+    "Sumoylation", "Desumoylation",
+    "Hydroxylation", "Dehydroxylation",
+    "Acetylation", "Deacetylation",
+    "Glycosylation", "Deglycosylation",
+    "Farnesylation", "Defarnesylation",
+    "Geranylgeranylation", "Degeranylgeranylation",
+    "Palmitoylation", "Depalmitoylation",
+    "Myristoylation", "Demyristoylation",
+    "Ribosylation", "Deribosylation",
+    "Methylation", "Demethylation"
+}
 
 # Default hard-invalid entity type pairs (never allowed).
 DEFAULT_FORBIDDEN_TYPE_PAIRS: Tuple[Tuple[str, str], ...] = (
@@ -17,10 +32,7 @@ DEFAULT_FORBIDDEN_TYPE_PAIRS: Tuple[Tuple[str, str], ...] = (
 
 # Default per-statement-label allowed type pairs.
 DEFAULT_ALLOWED_TYPE_PAIRS_BY_LABEL: Dict[str, Tuple[Tuple[str, str], ...]] = {
-    "Phosphorylation": (("GeneOrGeneProduct", "GeneOrGeneProduct"),),
-    "Dephosphorylation": (("GeneOrGeneProduct", "GeneOrGeneProduct"),),
-    "Ubiquitination": (("GeneOrGeneProduct", "GeneOrGeneProduct"),),
-    "Acetylation": (("GeneOrGeneProduct", "GeneOrGeneProduct"),),
+    **{ptm_type: (("GeneOrGeneProduct", "GeneOrGeneProduct"),) for ptm_type in PTM_STMT_TYPES},
     "Complex": (
         ("GeneOrGeneProduct", "GeneOrGeneProduct"),
         ("GeneOrGeneProduct", "ChemicalEntity"),
@@ -28,23 +40,29 @@ DEFAULT_ALLOWED_TYPE_PAIRS_BY_LABEL: Dict[str, Tuple[Tuple[str, str], ...]] = {
     ),
     "Activation": (
         ("GeneOrGeneProduct", "GeneOrGeneProduct"),
+        ("GeneOrGeneProduct", "DiseaseOrPhenotypicFeature"),
         ("ChemicalEntity", "GeneOrGeneProduct"),
     ),
     "Inhibition": (
         ("GeneOrGeneProduct", "GeneOrGeneProduct"),
+        ("GeneOrGeneProduct", "DiseaseOrPhenotypicFeature"),
         ("ChemicalEntity", "GeneOrGeneProduct"),
     ),
     "IncreaseAmount": (
         ("GeneOrGeneProduct", "GeneOrGeneProduct"),
         ("ChemicalEntity", "GeneOrGeneProduct"),
+        ("GeneOrGeneProduct", "DiseaseOrPhenotypicFeature"),
     ),
     "DecreaseAmount": (
         ("GeneOrGeneProduct", "GeneOrGeneProduct"),
         ("ChemicalEntity", "GeneOrGeneProduct"),
+        ("GeneOrGeneProduct", "DiseaseOrPhenotypicFeature"),
     ),
     "Translocation": (
-        ("GeneOrGeneProduct", "GeneOrGeneProduct"),
-        ("GeneOrGeneProduct", "DiseaseOrPhenotypicFeature"),
+        ("GeneOrGeneProduct", "GeneOrGeneProduct")
+    ),
+    "Conversion": (
+        ("GeneOrGeneProduct", "GeneOrGeneProduct")
     ),
 }
 
@@ -53,6 +71,7 @@ DEFAULT_FALLBACK_ALLOWED_TYPE_PAIRS: Tuple[Tuple[str, str], ...] = (
     ("GeneOrGeneProduct", "GeneOrGeneProduct"),
     ("ChemicalEntity", "GeneOrGeneProduct"),
     ("ChemicalEntity", "ChemicalEntity"),
+    ("GeneOrGeneProduct", "DiseaseOrPhenotypicFeature")
 )
 
 
@@ -70,8 +89,7 @@ class TypeConstraintConfig:
     Configuration for semantic / type-based post-filtering of statements.
     """
 
-    # Additional globally forbidden type pairs (beyond defaults).
-    extra_forbidden_type_pairs: Sequence[Sequence[str]] = field(default_factory=list)
+    # If True, use default forbidden type pairs.
     use_default_forbidden_pairs: bool = True
 
     # If True, drop statements where either argument is missing a type.
@@ -80,9 +98,7 @@ class TypeConstraintConfig:
     # If True, drop statements where both arguments point to the same span.
     drop_duplicate_span_pairs: bool = True
 
-    # Additional allowed pairs for specific statement labels.
-    # Keys should match stmt_pred["label"].
-    extra_allowed_type_pairs_by_label: Dict[str, Tuple[Tuple[str, str], ...]] = field(default_factory=dict)
+    # If True, use default allowed type pairs by label.
     use_default_allowed_pairs_by_label: bool = True
 
     # Fallback allowed pairs when no label-specific schema exists.
@@ -114,7 +130,6 @@ def filter_statements_by_type_constraints(
     forbidden_pairs = set()
     if cfg.use_default_forbidden_pairs:
         forbidden_pairs.update(_normalize_type_pair(p) for p in DEFAULT_FORBIDDEN_TYPE_PAIRS)
-    forbidden_pairs.update(_normalize_type_pair(p) for p in cfg.extra_forbidden_type_pairs)
 
     # Build allowed-by-label map
     allowed_by_label: Dict[str, set[Tuple[str, str]]] = {}
@@ -123,10 +138,6 @@ def filter_statements_by_type_constraints(
             allowed_by_label.setdefault(label, set()).update(
                 _normalize_type_pair(p) for p in pairs
             )
-    for label, pairs in cfg.extra_allowed_type_pairs_by_label.items():
-        allowed_by_label.setdefault(label, set()).update(
-            _normalize_type_pair(p) for p in pairs
-        )
 
     # Fallback allowed pairs
     fallback_allowed = {_normalize_type_pair(p) for p in cfg.fallback_allowed_type_pairs}
@@ -161,7 +172,8 @@ def filter_statements_by_type_constraints(
             continue
 
         # Label-specific schema
-        label = str(stmt.get("stmt_pred", {}).get("label", "")).strip()
+        # Try stmt_label first (already extracted), then fall back to gate3_prediction
+        label = str(stmt.get("stmt_label") or stmt.get("stmt_pred", {}).get("gate3_prediction", "")).strip()
         allowed_for_label = allowed_by_label.get(label)
 
         if allowed_for_label:
