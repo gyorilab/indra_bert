@@ -59,10 +59,10 @@ DEFAULT_ALLOWED_TYPE_PAIRS_BY_LABEL: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("GeneOrGeneProduct", "DiseaseOrPhenotypicFeature"),
     ),
     "Translocation": (
-        ("GeneOrGeneProduct", "GeneOrGeneProduct")
+        ("GeneOrGeneProduct", "GeneOrGeneProduct"),
     ),
     "Conversion": (
-        ("GeneOrGeneProduct", "GeneOrGeneProduct")
+        ("GeneOrGeneProduct", "GeneOrGeneProduct"),
     ),
 }
 
