@@ -75,12 +75,12 @@ def compute_metrics_span_level(eval_preds: EvalPrediction, inputs, id2label, tex
         text = texts[i]
 
         pred_spans = {
-            (s["start"], s["end"], s["text"])
+            (s["start"], s["end"], s["text"], s.get("type"))
             for s in extract_spans_from_encoding(tokens, offsets, pred_ids, id2label, text)
         }
 
         gold_spans = {
-            (s["start"], s["end"], s["text"])
+            (s["start"], s["end"], s["text"], s.get("type"))
             for s in extract_spans_from_encoding(tokens, offsets, gold_ids, id2label, text)
         }
 
@@ -236,6 +236,11 @@ def main():
             f.write(f"{key}: {value}\n")
 
     print(f"Test evaluation results saved to {log_file}")
+
+    # ---- Save final model and tokenizer for inference ----
+    print("Saving final model and tokenizer...")
+    trainer.save_model(output_dir)
+    tokenizer.save_pretrained(output_dir)
 
 
 if __name__ == "__main__":

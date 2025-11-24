@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch
 from collections import defaultdict
 from pathlib import Path
+import re
 
 from .preprocess import (
     preprocess_for_inference,
@@ -19,6 +20,9 @@ class IndraAgentsTagger:
         model_dir = Path(model_dir)
         self.tokenizer = SpecialTokenOffsetFixTokenizer(AutoTokenizer.from_pretrained(model_dir))
         self.model = AutoModelForTokenClassification.from_pretrained(model_dir)
+        # Device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
         self.model.eval()
         self.id2label = self.model.config.id2label
 
@@ -34,8 +38,8 @@ class IndraAgentsTagger:
         enc = preprocess_for_inference(stmt_type, entity_annotated_text, self.tokenizer)
         # for tok, offset in zip(enc['tokens'], enc['offsets']):
         #     print(f"{tok}: {offset}")
-        input_ids = enc["input_ids"]
-        attention_mask = enc["attention_mask"]
+        input_ids = enc["input_ids"].to(self.device)
+        attention_mask = enc["attention_mask"].to(self.device)
         
         tokens = enc["tokens"]
         offsets = enc["offsets"]
@@ -44,8 +48,8 @@ class IndraAgentsTagger:
         with torch.no_grad():
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
             probs = F.softmax(outputs.logits, dim=-1)
-            predictions = torch.argmax(probs, dim=2)[0]
-            confidence_scores = torch.max(probs, dim=2).values[0]
+            predictions = torch.argmax(probs, dim=2)[0].detach().cpu()
+            confidence_scores = torch.max(probs, dim=2).values[0].detach().cpu()
 
         pred_labels = [self.id2label[p.item()] if offsets[i] is not None and offsets[i] != (None, None) else "O"
                         for i, p in enumerate(predictions)]
@@ -53,32 +57,48 @@ class IndraAgentsTagger:
 
         return pred_labels, confidences, tokens, offsets, seq_ids
 
-    def extract_agents(self, tokens, bio_tags, seq_ids):
-        """
-        Returns a dictionary of role → list of phrases extracted using BIO tags.
-        """
-        agents = defaultdict(list)
-        current_tag, current_phrase = None, []
-
-        for token, tag, sid in zip(tokens, bio_tags, seq_ids):
-            if sid != 1:
+    @staticmethod
+    def _extract_entity_spans(annotated_text: str, clean_text: str, offset_map: dict) -> list[dict]:
+        """Locate each <e>...</e> span in clean-text coordinates."""
+        spans = []
+        for match in re.finditer(r"<e>(.*?)</e>", annotated_text):
+            start_annot = match.start() + 3
+            end_annot = match.end() - 4
+            clean_start = offset_map.get(start_annot)
+            clean_end = offset_map.get(end_annot - 1)
+            if clean_start is None or clean_end is None:
                 continue
-            if tag.startswith("B-"):
-                if current_tag and current_phrase:
-                    agents[current_tag].append("".join(current_phrase))
-                current_tag = tag[2:]
-                current_phrase = [token]
-            elif tag.startswith("I-") and current_tag:
-                current_phrase.append(token)
+            clean_end += 1
+            spans.append({
+                "start": clean_start,
+                "end": clean_end,
+                "text": clean_text[clean_start:clean_end]
+            })
+        return spans
+
+    @staticmethod
+    def _split_role_spans(role_spans: list[dict], entity_spans: list[dict]) -> list[dict]:
+        """Split role spans so each aligns to a single entity span."""
+        if not role_spans:
+            return []
+
+        split_spans = []
+        for span in role_spans:
+            overlaps = [
+                entity for entity in entity_spans
+                if entity["start"] >= span["start"] and entity["end"] <= span["end"]
+            ]
+            if overlaps:
+                for entity in overlaps:
+                    split_spans.append({
+                        "role": span["role"],
+                        "start": entity["start"],
+                        "end": entity["end"],
+                        "text": entity["text"]
+                    })
             else:
-                if current_tag and current_phrase:
-                    agents[current_tag].append("".join(current_phrase))
-                current_tag, current_phrase = None, []
-
-        if current_tag and current_phrase:
-            agents[current_tag].append("".join(current_phrase))
-
-        return dict(agents)
+                split_spans.append(span)
+        return split_spans
 
     def predict(self, stmt_type: str, annotated_text: str) -> dict:
         """
@@ -163,7 +183,12 @@ class IndraAgentsTagger:
             })
 
         # Step 5: Annotate clean text with <role> tags
-        agents = self.extract_agents(tokens, bio_tags, seq_ids)
+        entity_spans = self._extract_entity_spans(annotated_text, clean_text, offset_map)
+        role_spans = self._split_role_spans(role_spans, entity_spans)
+
+        agents = defaultdict(list)
+        for span in role_spans:
+            agents[span["role"]].append(span["text"])
 
         return {
             "stmt_type": stmt_type,
@@ -186,8 +211,8 @@ class IndraAgentsTagger:
         if enc["input_ids"].shape[0] == 0:
             return []
     
-        input_ids = enc["input_ids"]
-        attention_mask = enc["attention_mask"]
+        input_ids = enc["input_ids"].to(self.device)
+        attention_mask = enc["attention_mask"].to(self.device)
         tokens_batch = enc["tokens"]
         offsets_batch = enc["offsets"]
         seq_ids_batch = enc["sequence_ids"]
@@ -195,8 +220,8 @@ class IndraAgentsTagger:
         with torch.no_grad():
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
             probs = F.softmax(outputs.logits, dim=-1)
-            predictions = torch.argmax(probs, dim=2)
-            confidences = torch.max(probs, dim=2).values
+            predictions = torch.argmax(probs, dim=2).detach().cpu()
+            confidences = torch.max(probs, dim=2).values.detach().cpu()
 
         batch_results = []
 
@@ -285,7 +310,12 @@ class IndraAgentsTagger:
                     "text": clean_text[role_start:prev_end]
                 })
 
-            agents = self.extract_agents(tokens, bio_tags, seq_ids)
+            entity_spans = self._extract_entity_spans(annotated_texts[i], clean_text, offset_map)
+            role_spans = self._split_role_spans(role_spans, entity_spans)
+
+            agents = defaultdict(list)
+            for span in role_spans:
+                agents[span["role"]].append(span["text"])
 
             results.append({
                 "stmt_type": stmt_types[i],
