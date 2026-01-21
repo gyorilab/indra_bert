@@ -2,7 +2,7 @@ __all__ = ['IndraStructuredExtractor']
 
 import os
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 from itertools import combinations
 
 from huggingface_hub import hf_hub_download
@@ -283,7 +283,7 @@ class IndraStructuredExtractor:
                 if self.ptm_site_model and stmt_label in PTM_STMT_TYPES:
                     # Get object/substrate agents from role prediction
                     object_agents = [r for r in role_pred.get('role_spans', []) 
-                                   if r.get('role') in ('object', 'substrate', 'sub')]
+                                   if r.get('role') in ("obj", "object", "sub", "substrate")]
                     if object_agents:
                         # Use predict_batch for consistency (even with single item)
                         ptm_sites_pred = self.ptm_site_model.predict_batch([object_agents], [annotated_text])[0]
@@ -381,7 +381,7 @@ class IndraStructuredExtractor:
                 stmt_label = stmt_pred.get('gate3_prediction') or "unknown"
                 if stmt_label in PTM_STMT_TYPES:
                     object_agents = [r for r in role_pred.get('role_spans', []) 
-                                   if r.get('role') in ('object', 'substrate', 'sub')]
+                                   if r.get('role') in ("obj", "object", "sub", "substrate")]
                     if object_agents:
                         ptm_indices.append(i)
                         ptm_inputs_agents.append(object_agents)
@@ -440,20 +440,25 @@ class IndraStructuredExtractor:
         
         return all_statements
     
-    def get_json_indra_stmts(
+    def filter_structured_statements(
         self,
-        text,
-        source_api="indra_bert",
+        structured_statements: List[Dict],
         semantic_type_filter: bool = True,
         semantic_type_filter_config: Optional[Union[TypeConstraintConfig, dict]] = None,
-    ):
-        """Extract statements and convert to INDRA-style JSON with agent coords."""
-        try:
-            structured_statements = self.extract_structured_statements_batch(text)
-        except Exception as e:
-            logger.warning(f"Batch extraction failed. Falling back to iterative extraction. Error: {e}")
-            structured_statements = self.extract_structured_statements(text)
- 
+    ) -> List[Dict]:
+        """
+        Filter structured statements through multiple filtering stages:
+        1. Semantic type filtering
+        2. Negation filtering
+        3. Multi-gate filtering (Gate1, Gate2, Gate3)
+        4. Confidence threshold filtering
+        5. Role reconciliation and required roles check
+        
+        Returns filtered statements in the same format as input (no modifications to dict structure).
+        """
+        filtered_statements = structured_statements
+        
+        # Apply semantic type filtering
         if semantic_type_filter:
             if semantic_type_filter_config is None:
                 cfg = TypeConstraintConfig()
@@ -466,17 +471,29 @@ class IndraStructuredExtractor:
                     "semantic_type_filter_config must be a TypeConstraintConfig, dict, or None"
                 )
 
-            filter_result = filter_statements_by_type_constraints(structured_statements, config=cfg)
+            filter_result = filter_statements_by_type_constraints(filtered_statements, config=cfg)
             if filter_result.drop_reasons:
                 logger.debug(
                     "Semantic type filtering dropped statements: %s",
                     dict(filter_result.drop_reasons),
                 )
-            structured_statements = filter_result.kept_statements
+            filtered_statements = filter_result.kept_statements
 
-        indra_statements = []
-
-        for stmt in structured_statements:
+        # Apply multi-gate and other filters
+        final_filtered = []
+        filter_stats = {
+            'total': len(filtered_statements),
+            'negated': 0,
+            'gate1_failed': 0,
+            'gate2_failed': 0,
+            'gate3_failed': 0,
+            'confidence_failed': 0,
+            'no_roles': 0,
+            'required_roles_failed': 0,
+            'passed': 0,
+        }
+        
+        for stmt in filtered_statements:
             raw_pred = stmt.get('stmt_pred', {})
             gate1_prediction = raw_pred.get('gate1_prediction')
             gate2_prediction = raw_pred.get('gate2_prediction')
@@ -493,6 +510,7 @@ class IndraStructuredExtractor:
             
             # If predicate is negated, skip this statement (no relation)
             if is_negated:
+                filter_stats['negated'] += 1
                 logger.debug(
                     "Skipping statement due to negated predicate: stmt_type=%s, predicate_spans=%s",
                     gate3_prediction,
@@ -503,6 +521,7 @@ class IndraStructuredExtractor:
             gate1_has_prob = float(gate1_probs.get("has_relation", 0.0))
             gate1_positive = gate1_prediction == "has_relation" or gate1_has_prob >= GATE1_HAS_RELATION_THRESHOLD
             if not gate1_positive:
+                filter_stats['gate1_failed'] += 1
                 continue
 
             gate2_no_prob = float(gate2_probs.get("no_relation", 0.0))
@@ -521,6 +540,7 @@ class IndraStructuredExtractor:
                         gate2_prediction_effective = None
 
             if gate2_prediction_effective is None:
+                filter_stats['gate2_failed'] += 1
                 continue
 
             gate2_type_candidates = GATE2_TO_INDRA_TYPE.get(gate2_prediction_effective, [])
@@ -534,20 +554,31 @@ class IndraStructuredExtractor:
                 if gate3_prediction in PTM_STMT_TYPES:
                     stmt_type = gate3_prediction
                 else:
-                    continue
+                    # If gate3_prediction is not a PTM type, fall through to use first candidate
+                    # (don't filter out immediately - "PTM" is just a placeholder category)
+                    if gate2_type_candidates:
+                        # Use first non-PTM candidate, or PTM if it's the only one
+                        non_ptm_candidates = [c for c in gate2_type_candidates if c != "PTM"]
+                        stmt_type = non_ptm_candidates[0] if non_ptm_candidates else gate2_type_candidates[0]
+                    else:
+                        filter_stats['gate3_failed'] += 1
+                        continue
             # Otherwise, use the first candidate if available
             elif gate2_type_candidates:
                 stmt_type = gate2_type_candidates[0]
             else:
+                filter_stats['gate3_failed'] += 1
                 continue
 
             if stmt_type in (None, "no_relation","No_Relation", "unknown"):
+                filter_stats['gate3_failed'] += 1
                 continue
 
             stmt_confidence = 0.0
             if isinstance(gate3_probs, dict):
                 stmt_confidence = float(gate3_probs.get(stmt_type, gate3_probs.get(str(stmt_type), 0.0)))
             if stmt_confidence < GATE3_CONF_THRESHOLD:
+                filter_stats['confidence_failed'] += 1
                 continue
 
             roles = stmt['role_pred']['roles']
@@ -590,6 +621,7 @@ class IndraStructuredExtractor:
                 })
 
             if not reconciled_roles:
+                filter_stats['no_roles'] += 1
                 continue
 
             mutations_pred = stmt['mutations_pred']['mutations']
@@ -654,14 +686,123 @@ class IndraStructuredExtractor:
                             })
                             break
 
-            if not _has_required_roles(stmt_type, agent_roles):
+            # Check required roles using reconciled_roles
+            # Build temporary agent_roles dict for required roles check
+            temp_agent_roles = {role_info['role']: {} for role_info in reconciled_roles}
+            if not _has_required_roles(stmt_type, temp_agent_roles):
+                filter_stats['required_roles_failed'] += 1
                 logger.debug(
                     "Skipping %s statement due to missing required roles: %s",
                     stmt_type,
-                    list(agent_roles.keys()),
+                    list(temp_agent_roles.keys()),
                 )
                 continue
 
+            # Statement passes all filters - add stmt_type and reconciled_roles for downstream use
+            stmt['stmt_type'] = stmt_type
+            stmt['reconciled_roles'] = reconciled_roles
+            filter_stats['passed'] += 1
+            final_filtered.append(stmt)
+
+        if filter_stats['total'] > 0:
+            logger.debug(f"Filter stats: {filter_stats}")
+        
+        return final_filtered
+
+    def get_json_indra_stmts(
+        self,
+        text,
+        source_api="indra_bert",
+        semantic_type_filter: bool = True,
+        semantic_type_filter_config: Optional[Union[TypeConstraintConfig, dict]] = None,
+    ):
+        """Extract statements and convert to INDRA-style JSON with agent coords."""
+        try:
+            structured_statements = self.extract_structured_statements_batch(text)
+        except Exception as e:
+            logger.warning(f"Batch extraction failed. Falling back to iterative extraction. Error: {e}")
+            structured_statements = self.extract_structured_statements(text)
+        
+        # Filter statements
+        filtered_statements = self.filter_structured_statements(
+            structured_statements,
+            semantic_type_filter=semantic_type_filter,
+            semantic_type_filter_config=semantic_type_filter_config,
+        )
+        
+        # Convert filtered statements to INDRA JSON format
+        indra_statements = []
+        for stmt in filtered_statements:
+            # Use stmt_type and reconciled_roles that were already computed in filter_structured_statements
+            stmt_type = stmt.get('stmt_type')
+            reconciled_roles = stmt.get('reconciled_roles', [])
+            if stmt_type is None or not reconciled_roles:
+                continue
+            
+            # Build agent_roles
+            mutations_pred = stmt['mutations_pred']['mutations']
+            ptm_sites = stmt.get('ptm_sites_pred', {}).get('sites', [])
+            
+            agent_roles = {}
+            raw_texts = []
+            coords = []
+            ptm_sites_list = []
+            
+            for role_info in reconciled_roles:
+                role = role_info['role']
+                name = role_info['text']
+                start = role_info['start']
+                end = role_info['end']
+                
+                raw_texts.append(name)
+                coords.append([start, end])
+                
+                agent_roles[role] = {
+                    "name": name,
+                    "type": role_info.get('type'),
+                    "raw_type": role_info.get('raw_type'),
+                    "db_refs": {
+                        "TEXT": name
+                    }
+                }
+                
+                mutation_key = (start, end, name)
+                if mutation_key not in mutations_pred:
+                    mutation_key = next(
+                        (key for key in mutations_pred.keys()
+                         if len(key) == 3 and key[0] == start and key[1] == end),
+                        mutation_key
+                    )
+                
+                if mutations_pred.get(mutation_key):
+                    raw_mutations = mutations_pred[mutation_key]
+                    parsed_mutations = convert_to_indra_mutations(raw_mutations)
+                    agent_roles[role]["mutations"] = parsed_mutations
+            
+            # Collect PTM sites
+            for ptm_site in ptm_sites:
+                site_agent = ptm_site.get('agent', {})
+                agent_key = (site_agent.get('start'), site_agent.get('end'), site_agent.get('text'))
+                for role_info in reconciled_roles:
+                    if (role_info['start'], role_info['end'], role_info['text']) == agent_key:
+                        if role_info.get('role') in ('object', 'substrate', 'sub'):
+                            ptm_sites_list.append({
+                                "residue": ptm_site.get('residue'),
+                                "position": ptm_site.get('position'),
+                                "normalized": ptm_site.get('normalized'),
+                                "text": ptm_site.get('text'),
+                                "agent_role": role_info['role']
+                            })
+                            if "mods" not in agent_roles[role_info['role']]:
+                                agent_roles[role_info['role']]["mods"] = []
+                            agent_roles[role_info['role']]["mods"].append({
+                                "mod_type": stmt_type.lower(),
+                                "residue": ptm_site.get('residue'),
+                                "position": ptm_site.get('position')
+                            })
+                            break
+            
+            # Build INDRA statement
             evidence_annotations = {
                 "agents": {
                     "raw_text": raw_texts,
@@ -671,7 +812,7 @@ class IndraStructuredExtractor:
             
             if ptm_sites_list:
                 evidence_annotations["ptm_sites"] = ptm_sites_list
-
+            
             indra_stmt = {
                 "type": stmt_type,
                 **agent_roles,
@@ -681,9 +822,9 @@ class IndraStructuredExtractor:
                     "annotations": evidence_annotations
                 }]
             }
-
+            
             indra_statements.append(indra_stmt)
-
+        
         return indra_statements
     
     def sentence_tokenize(self, text, mode='nltk'):
